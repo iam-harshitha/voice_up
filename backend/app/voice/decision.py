@@ -25,6 +25,7 @@ class NoDecisionReason(StrEnum):
     UNCERTAIN = "uncertain"
     NEEDS_CLARIFICATION = "needs_clarification"
     LOW_CONFIDENCE = "low_confidence"
+    CONDITION_MISSING = "condition_missing"
 
 
 @dataclass(frozen=True)
@@ -44,10 +45,16 @@ class Interpretation:
     vote: VoteChoice | None
     reason: NoDecisionReason | None
     confidence: float | None
+    # Set only for a valid conditional approval: what the approver required.
+    condition: str | None = None
 
     @property
     def is_vote(self) -> bool:
         return self.vote is not None
+
+    @property
+    def is_condition(self) -> bool:
+        return self.condition is not None
 
 
 def _normalize(value: str | None) -> str | None:
@@ -112,6 +119,11 @@ def interpret(execution: ProviderExecution, expected: ExpectedCall) -> Interpret
         return _no(NoDecisionReason.NEEDS_CLARIFICATION, candidate, decision.confidence)
     if not _confident(decision, expected.min_confidence):
         return _no(NoDecisionReason.LOW_CONFIDENCE, candidate, decision.confidence)
+    if candidate is DecisionChoice.CONDITIONAL_APPROVE:
+        # Never a vote. Without the stated condition there is nothing to record.
+        if not execution.condition_text:
+            return _no(NoDecisionReason.CONDITION_MISSING, candidate, decision.confidence)
+        return Interpretation(candidate, None, None, decision.confidence, execution.condition_text)
 
     vote = VoteChoice.APPROVE if candidate is DecisionChoice.APPROVE else VoteChoice.REJECT
     return Interpretation(candidate, vote, None, decision.confidence)

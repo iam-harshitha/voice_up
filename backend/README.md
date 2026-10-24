@@ -1,4 +1,4 @@
-# Approval Line — backend (Chunk 1)
+# Approval Line — backend
 
 Approval Line lets an AI agent ask humans for authorization before it takes a
 consequential action. An organization configures a policy that needs one or two
@@ -9,7 +9,13 @@ the result over a REST API.
 Chunk 2 adds voice approvals: Approval Line calls each approver through Bolna, and
 turns a verified, explicit spoken decision into a vote through the same approval
 service. See **[docs/voice-bolna.md](docs/voice-bolna.md)** for the design, the verified
-Bolna contract, setup and limitations. The dashboard and MCP come in later chunks.
+Bolna contract, setup and limitations.
+
+Chunk 3 adds quorum and veto policies, backup approvers with durable time-based
+escalation, decision deadlines, conditional approvals that can never authorize by
+themselves, policy audit events, and an audit timeline API. The exact semantics,
+states, endpoints and a walkthrough are in **[docs/policies.md](docs/policies.md)**.
+The dashboard and MCP come in later chunks.
 
 ## Requirements
 
@@ -123,6 +129,8 @@ Send it as the `X-API-Key` header.
 | `votes:write` | record a vote (trusted integration only, see below) |
 | `voice:calls:create` | schedule approval phone calls for a request |
 | `voice:calls:read` | read a request's call status and outcomes |
+| `conditions:resolve` | resolve a conditional approval (never approves by itself) |
+| `audit:read` | read request and policy audit timelines |
 
 An agent key should have only `requests:create,requests:read`. It must never hold
 `votes:write` or `policies:write`.
@@ -140,7 +148,11 @@ An agent key should have only `requests:create,requests:read`. It must never hol
 | `GET /policies`, `GET /policies/{id}` | policies:read | `?is_active=` filter |
 | `PATCH /policies/{id}` | policies:write | any change bumps `version` |
 | `POST /requests` | requests:create | `policy_id`, `action`, `summary`, `context` (object, ≤16 KB) |
-| `GET /requests`, `GET /requests/{id}` | requests:read | `?status=pending\|approved\|rejected` |
+| `GET /requests`, `GET /requests/{id}` | requests:read | `?status=pending\|approved\|rejected\|expired`; detail includes `evaluation` and `expires_at` |
+| `GET /requests/{id}/conditions`, `GET /requests/{id}/escalations` | requests:read | conditions and escalation steps |
+| `POST /requests/{id}/conditions` | votes:write | record a conditional approval (trusted integration) |
+| `POST /requests/{id}/conditions/{cid}/resolve` | conditions:resolve | `satisfied` \| `not_satisfied`, `note`, optional `evidence_reference` |
+| `GET /requests/{id}/audit-events`, `GET /policies/{id}/audit-events` | audit:read | `?after=<sequence>&limit≤200` |
 | `POST /requests/{id}/votes` | votes:write | `approver_id`, `vote` = approve\|reject; 201 new, 200 identical repeat |
 | `POST /requests/{id}/voice-calls` | voice:calls:create | one call per snapshotted approver; 201 new, 200 already scheduled; optional `{"redial_unanswered": true}` |
 | `GET /requests/{id}/voice-calls` | voice:calls:read | call status, attempts, decision status, outcome (no phone numbers) |
@@ -174,8 +186,10 @@ found in your organization, 409 conflicting or late vote, 422 schema validation,
 
 ## Voice worker
 
-Calls are placed and provider events are processed by a separate worker process. It
-uses a PostgreSQL job queue; run as many workers as you like.
+Calls are placed, provider events processed, deadlines enforced and escalation rounds
+run by a separate worker process. It uses a PostgreSQL job queue; run as many workers
+as you like. With `VOICE_PROVIDER=disabled` it still runs deadline and escalation jobs.
+After a restart, unfinished jobs are picked up again when their lease expires.
 
 ```powershell
 python -m app.workers.voice_worker            # long-running; Ctrl+C stops after the current job
@@ -269,5 +283,4 @@ app/cli.py                    org / API-key bootstrap
 - Stronger approver verification for voice (e.g. a spoken PIN) before production use.
 - Separate migration-owner and runtime database roles, so the runtime role can only
   `INSERT`/`SELECT` audit events.
-- An audit-event read endpoint for the dashboard timeline (order by `sequence`).
 - Key rotation metadata (last used, expiry) on `api_keys`.

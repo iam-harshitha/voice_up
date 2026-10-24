@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
 
 from app.api.dependencies import DbSession, OrganizationContext, PageParams, require_scope
+from app.api.v1.presenters import request_read
 from app.core.security import Scope
 from app.domain.approval_rules import RequestStatus
 from app.schemas.common import Page
@@ -21,7 +22,7 @@ def create_request(
     body: ApprovalRequestCreate, org: CanCreate, session: DbSession
 ) -> ApprovalRequestRead:
     request = approval_service.create_request(session, org.organization_id, body)
-    return ApprovalRequestRead.model_validate(request)
+    return request_read(session, request)
 
 
 @router.get("")
@@ -45,4 +46,4 @@ def list_requests(
 @router.get("/{request_id}")
 def get_request(request_id: UUID, org: CanRead, session: DbSession) -> ApprovalRequestRead:
     request = approval_service.get_request(session, org.organization_id, request_id)
-    return ApprovalRequestRead.model_validate(request)
+    return request_read(session, request)

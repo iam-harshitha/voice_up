@@ -125,17 +125,26 @@ Verified against the official docs on **2026-10-24**:
    > these facts; never invent details. Never encourage approval. If they are unsure, or
    > want conditions or more information, do not record approval. Before ending, repeat
    > their decision back and ask them to confirm it.
-3. **Extractions:** in the agent's Extractions tab, create category **`Approval`** with
-   two pre-defined-answer extractions:
-   - **`Decision`**, with answers exactly `approve`, `reject`, `uncertain`,
-     `needs_clarification`. Prompt: "The approver's final, confirmed decision. Use
-     approve or reject only if they explicitly and unconditionally said so and confirmed
-     it; otherwise uncertain or needs_clarification."
-   - **`Identity Confirmed`**, with answers `yes` and `no`. Prompt: "Did the person
-     confirm they are {approver_name}?"
+3. **Extractions:** in the agent's Extractions tab, create category **`Approval`** with:
+   - **`Decision`** (pre-defined answers), with answers exactly `approve`, `reject`,
+     `uncertain`, `needs_clarification` and `conditional_approve`. Prompt: "The
+     approver's final, confirmed decision. Use approve or reject only if they explicitly
+     and unconditionally said so and confirmed it. Use conditional_approve if they
+     approve only once something else happens. Otherwise use uncertain or
+     needs_clarification."
+   - **`Identity Confirmed`** (pre-defined answers), with answers `yes` and `no`.
+     Prompt: "Did the person confirm they are {approver_name}?"
+   - **`Condition`** (free text). Prompt: "If the approver approved only on a
+     condition, state the condition in one sentence; otherwise leave empty."
+     Approval Line stores this text; it never interprets it, and a conditional answer
+     never becomes a vote (see `policies.md`). A `conditional_approve` without condition
+     text is recorded as `condition_missing` and treated as no decision.
 
    If you choose other names, set `BOLNA_EXTRACTION_CATEGORY`,
-   `BOLNA_DECISION_EXTRACTION` and `BOLNA_IDENTITY_EXTRACTION`.
+   `BOLNA_DECISION_EXTRACTION`, `BOLNA_IDENTITY_EXTRACTION` and
+   `BOLNA_CONDITION_EXTRACTION`. **Unverified:** that Bolna returns free-text answers
+   in the `subjective` field of a free-text extraction; check this against a real
+   execution.
 4. **Webhook:** in the Extractions tab's webhook card, set the URL to
    `https://<public-host>/api/v1/voice/webhooks/bolna`. Turn on **Add headers** and add
    `X-Approval-Line-Webhook-Token: <VOICE_WEBHOOK_TOKEN>`. Leave "Trigger on statuses"

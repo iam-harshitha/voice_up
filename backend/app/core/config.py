@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     bolna_extraction_category: str = "Approval"
     bolna_decision_extraction: str = "Decision"
     bolna_identity_extraction: str = "Identity Confirmed"
+    # Free-text extraction holding what a conditional approval requires (stored, never
+    # interpreted).
+    bolna_condition_extraction: str = "Condition"
     # Sent by Bolna as a custom webhook header; compared in constant time.
     voice_webhook_token: SecretStr | None = None
     voice_webhook_max_bytes: int = Field(default=256 * 1024, ge=1024, le=5 * 1024 * 1024)

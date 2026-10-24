@@ -86,8 +86,12 @@ def _build_parser() -> argparse.ArgumentParser:
     simulate.add_argument(
         "--decision",
         default="approve",
-        help="Extracted decision: approve, reject, uncertain, needs_clarification, or none.",
+        help=(
+            "Extracted decision: approve, reject, uncertain, needs_clarification, "
+            "conditional_approve, or none."
+        ),
     )
+    simulate.add_argument("--condition", help="Stated condition (with conditional_approve).")
     simulate.add_argument("--identity", default="yes", help="Identity confirmed: yes/no/none.")
     simulate.add_argument("--confidence", type=float, default=0.95)
     simulate.add_argument(
@@ -128,6 +132,7 @@ def _voice_simulate(args: argparse.Namespace, settings) -> None:
             identity=optional(args.identity),
             confidence=args.confidence,
             identity_confidence=args.confidence,
+            condition=args.condition,
         )
     else:
         payload = mock.set_status(execution["id"], args.status)

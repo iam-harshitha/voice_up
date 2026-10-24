@@ -17,7 +17,9 @@ CanWrite = Annotated[OrganizationContext, Depends(require_scope(Scope.POLICIES_W
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_policy(body: PolicyCreate, org: CanWrite, session: DbSession) -> PolicyRead:
-    policy = policy_service.create_policy(session, org.organization_id, body)
+    policy = policy_service.create_policy(
+        session, org.organization_id, body, actor_api_key_id=org.principal.api_key_id
+    )
     return PolicyRead.model_validate(policy)
 
 
@@ -49,5 +51,7 @@ def get_policy(policy_id: UUID, org: CanRead, session: DbSession) -> PolicyRead:
 def update_policy(
     policy_id: UUID, body: PolicyUpdate, org: CanWrite, session: DbSession
 ) -> PolicyRead:
-    policy = policy_service.update_policy(session, org.organization_id, policy_id, body)
+    policy = policy_service.update_policy(
+        session, org.organization_id, policy_id, body, actor_api_key_id=org.principal.api_key_id
+    )
     return PolicyRead.model_validate(policy)

@@ -218,6 +218,7 @@ class TestAtomicity:
                 organization_id=existing.organization_id,
                 request_id=existing.request_id,
                 approver_id=existing.approver_id,
+                seat_approver_id=UUID(pending["bob"]["id"]),
                 vote="reject",
             )
         )

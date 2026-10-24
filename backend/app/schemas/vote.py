@@ -15,6 +15,7 @@ class VoteCreate(StrictInput):
 class VoteRead(ApiOutput):
     id: UUID
     approver_id: UUID
+    seat_approver_id: UUID
     vote: VoteChoice
     created_at: datetime
 

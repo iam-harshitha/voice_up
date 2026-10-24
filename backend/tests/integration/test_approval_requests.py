@@ -22,7 +22,10 @@ def test_create_request_snapshots_policy(client, tenant, two_approver_setup, ses
     assert request["context"] == {"build": "1.4.2"}
     assert request["votes"] == []
 
-    events = session.scalars(select(AuditEvent)).all()
+    # Policy administration is audited separately (policy_id); look at this request only.
+    events = session.scalars(
+        select(AuditEvent).where(AuditEvent.request_id == UUID(request["id"]))
+    ).all()
     assert [e.event_type for e in events] == ["request.created"]
     assert events[0].event_data["approver_ids"] == request["authorized_approver_ids"]
     assert "build" not in str(events[0].event_data)  # context is not copied into audit
@@ -171,12 +174,13 @@ class TestAuditTrail:
     def test_audit_events_are_append_only_in_the_database(
         self, client, tenant, two_approver_setup, session
     ):
-        create_request(client, tenant, two_approver_setup["policy"]["id"])
+        request = create_request(client, tenant, two_approver_setup["policy"]["id"])
         for statement in ("UPDATE audit_events SET event_type = 'x'", "DELETE FROM audit_events"):
             with pytest.raises(DBAPIError, match="append-only"):
                 session.execute(text(statement))
             session.rollback()
-        assert len(session.scalars(select(AuditEvent)).all()) == 1
+        mine = select(AuditEvent).where(AuditEvent.request_id == UUID(request["id"]))
+        assert len(session.scalars(mine).all()) == 1
 
 
 def test_cannot_create_request_with_other_tenants_policy(client, tenant, make_tenant):

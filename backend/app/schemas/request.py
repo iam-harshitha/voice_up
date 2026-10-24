@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.domain.approval_rules import RequestStatus
 from app.schemas.common import ApiOutput, StrictInput, bounded_text
@@ -33,6 +33,27 @@ class ApprovalRequestCreate(StrictInput):
         return value
 
 
+class EvaluationRead(BaseModel):
+    """Server-derived policy evaluation. Only ``authorized: true`` permits the action."""
+
+    state: str  # awaiting_approvals | waiting_for_condition | approved | rejected | expired
+    reason: str
+    authorized: bool
+    next_action: str  # await_decisions | resolve_condition | none
+    approvals: int
+    rejections: int
+    required_approvals: int
+    veto_triggered: bool
+    outstanding_approver_ids: list[UUID]
+    condition_approver_ids: list[UUID]
+    # Who must re-approve (the approver who stated the satisfied condition; possibly a
+    # backup), and the seats they hold, in the same order.
+    reapproval_approver_ids: list[UUID]
+    reapproval_seat_ids: list[UUID]
+    deadline_passed: bool
+    expires_at: datetime | None
+
+
 class ApprovalRequestSummary(ApiOutput):
     id: UUID
     policy_id: UUID
@@ -44,9 +65,11 @@ class ApprovalRequestSummary(ApiOutput):
     created_at: datetime
     updated_at: datetime
     decided_at: datetime | None
+    expires_at: datetime | None
 
 
 class ApprovalRequestRead(ApprovalRequestSummary):
     context: dict[str, Any]
     authorized_approver_ids: list[UUID]
     votes: list[VoteRead]
+    evaluation: EvaluationRead | None = None

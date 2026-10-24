@@ -181,6 +181,10 @@ def _record_decision(
     call.decision_candidate = interpretation.candidate.value if interpretation.candidate else None
     call.decision_confidence = interpretation.confidence
 
+    # A verified conditional approval is a condition, checked before "no vote".
+    if interpretation.is_condition:
+        return _record_condition(session, call, request, interpretation.condition or "")
+
     if not interpretation.is_vote:
         reason = interpretation.reason.value if interpretation.reason else "no_decision"
         call.decision_status = DecisionStatus.NO_DECISION
@@ -246,6 +250,45 @@ def _record_decision(
     return call.outcome
 
 
+def _record_condition(
+    session: Session, call: VoiceCall, request: ApprovalRequest, description: str
+) -> str:
+    """A verified conditional approval becomes a condition record, never a vote."""
+    try:
+        with session.begin_nested():
+            outcome = approval_service.record_condition(
+                session,
+                call.organization_id,
+                request.id,
+                call.approver_id,
+                description,
+                source="voice",
+                voice_call_id=call.id,
+            )
+    except AppError as exc:
+        call.decision_status = DecisionStatus.REFUSED
+        call.outcome = exc.code[:48]
+        _audit(
+            session,
+            call,
+            AuditEventType.VOICE_DECISION_REJECTED,
+            reason=exc.code,
+            candidate=call.decision_candidate,
+        )
+        return exc.code
+    call.decision_status = DecisionStatus.CONDITIONAL
+    call.outcome = "condition_recorded" if outcome.created else "condition_already_recorded"
+    _audit(
+        session,
+        call,
+        AuditEventType.VOICE_DECISION_ACCEPTED,
+        decision=call.decision_candidate,
+        condition_id=str(outcome.condition.id),
+        request_status=outcome.request.status,
+    )
+    return call.outcome
+
+
 def apply_execution(
     session: Session,
     settings: Settings,
@@ -286,6 +329,9 @@ def apply_execution(
         )
         if request is None or call is None:  # pragma: no cover - RESTRICT foreign keys
             raise RuntimeError("voice call or request disappeared")
+        # Everything below happens at the moment the locks were granted, not when the
+        # event arrived (the deadline itself is re-checked by approval_service).
+        now = utcnow()
 
         # Re-check the binding under the lock: the call may have been bound to a different
         # execution (or moved on) since the unlocked lookup.

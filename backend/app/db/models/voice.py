@@ -30,8 +30,9 @@ class DecisionStatus:
     ACCEPTED = "accepted"  # a vote was recorded through the approval service
     NO_DECISION = "no_decision"  # call ended without a valid explicit decision
     REFUSED = "refused"  # valid decision, but the approval service refused the vote
+    CONDITIONAL = "conditional"  # a conditional approval was recorded (not a vote)
 
-    ALL = (AWAITING, ACCEPTED, NO_DECISION, REFUSED)
+    ALL = (AWAITING, ACCEPTED, NO_DECISION, REFUSED, CONDITIONAL)
 
 
 class VoiceCall(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
@@ -100,7 +101,9 @@ class JobType:
     INITIATE_CALL = "initiate_call"
     PROCESS_EVENT = "process_event"
     RECONCILE_CALL = "reconcile_call"
-    ALL = (INITIATE_CALL, PROCESS_EVENT, RECONCILE_CALL)
+    EXPIRE_REQUEST = "expire_request"
+    ESCALATE_REQUEST = "escalate_request"
+    ALL = (INITIATE_CALL, PROCESS_EVENT, RECONCILE_CALL, EXPIRE_REQUEST, ESCALATE_REQUEST)
 
 
 class JobStatus:
@@ -112,7 +115,11 @@ class JobStatus:
 
 
 class VoiceJob(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
-    """PostgreSQL-backed work queue, claimed with FOR UPDATE SKIP LOCKED and leased."""
+    """PostgreSQL-backed work queue, claimed with FOR UPDATE SKIP LOCKED and leased.
+
+    Despite the name it is the workflow queue: voice jobs (initiate/process/reconcile)
+    and request jobs (deadline expiry, escalation rounds) share it and one worker.
+    """
 
     __tablename__ = "voice_jobs"
     __table_args__ = (
@@ -123,7 +130,20 @@ class VoiceJob(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
             "(job_type = 'process_event') = (event_id IS NOT NULL)", name="event_job_has_event"
         ),
         CheckConstraint(
-            "job_type = 'process_event' OR voice_call_id IS NOT NULL", name="call_job_has_call"
+            "job_type NOT IN ('initiate_call', 'reconcile_call') OR voice_call_id IS NOT NULL",
+            name="call_job_has_call",
+        ),
+        CheckConstraint(
+            "(job_type IN ('expire_request', 'escalate_request')) = (request_id IS NOT NULL)",
+            name="request_job_has_request",
+        ),
+        # One deadline job and one escalation job per request; each reschedules itself.
+        Index(
+            "uq_voice_jobs_request_job",
+            "request_id",
+            "job_type",
+            unique=True,
+            postgresql_where=text("request_id IS NOT NULL"),
         ),
         CheckConstraint(
             "(status = 'processing') = (lease_expires_at IS NOT NULL)", name="lease_matches_status"
@@ -154,6 +174,9 @@ class VoiceJob(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
     event_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("voice_provider_events.id", ondelete="RESTRICT"), unique=True
+    )
+    request_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("approval_requests.id", ondelete="RESTRICT"), index=True
     )
     attempts: Mapped[int] = mapped_column(default=0, server_default="0")
     max_attempts: Mapped[int]

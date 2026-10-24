@@ -16,6 +16,19 @@ class ApprovalVote(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         # One final vote per approver per request; the second line of defence behind the
         # row lock taken by the vote service.
         UniqueConstraint("request_id", "approver_id"),
+        # One deciding vote per seat: a backup and the primary it replaces cannot both vote.
+        UniqueConstraint("request_id", "seat_approver_id"),
+        # Only approvers in the request's snapshot can vote, for a seat of that request.
+        ForeignKeyConstraint(
+            ["request_id", "approver_id"],
+            ["request_approvers.request_id", "request_approvers.approver_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["request_id", "seat_approver_id"],
+            ["request_approvers.request_id", "request_approvers.approver_id"],
+            ondelete="RESTRICT",
+        ),
         ForeignKeyConstraint(
             ["request_id", "organization_id"],
             ["approval_requests.id", "approval_requests.organization_id"],
@@ -35,4 +48,6 @@ class ApprovalVote(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
     request_id: Mapped[uuid.UUID]
     approver_id: Mapped[uuid.UUID] = mapped_column(index=True)
+    # The primary approver's seat this vote decides (== approver_id unless a backup voted).
+    seat_approver_id: Mapped[uuid.UUID]
     vote: Mapped[str] = mapped_column(String(16))

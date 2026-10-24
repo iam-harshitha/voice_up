@@ -64,6 +64,7 @@ class ClaimedJob:
     job_type: str
     voice_call_id: UUID | None
     event_id: UUID | None
+    request_id: UUID | None
     attempts: int
     max_attempts: int
     # True when this claim took over an expired lease (the previous worker died).
@@ -120,6 +121,7 @@ def claim_next(
             job.job_type,
             job.voice_call_id,
             job.event_id,
+            job.request_id,
             job.attempts,
             job.max_attempts,
             recovered,
@@ -520,23 +522,94 @@ def run_reconcile(
     return result
 
 
+# --- request jobs: deadline expiry and escalation rounds ----------------------------
+#
+# Each runs entirely inside ONE transaction that holds the job row and then the request
+# row, so the business transition, its audit events and the job's completion or
+# rescheduling commit together. Lock order: job, then request (no other path locks a
+# request job row after a request row).
+
+
+def _finish_request_job(row: VoiceJob, next_run_at: datetime | None) -> None:
+    if next_run_at is None:
+        _succeed(row)
+    else:
+        row.status = JobStatus.PENDING
+        row.lease_expires_at = None
+        row.locked_by = None
+        row.attempts = 0  # a reschedule is progress, not a failed attempt
+        row.run_after = next_run_at
+
+
+def run_expire(session_factory, provider, settings, job, worker_id, *, now=None) -> str:
+    from app.services.approval_service import expire_if_due
+
+    with session_factory() as session, transaction(session):
+        row = _owned_job(session, job, worker_id)
+        if row is None:
+            return "lease_lost"
+        result, reschedule = expire_if_due(session, _require(job.request_id), now or utcnow())
+        _finish_request_job(row, reschedule)
+    logger.info(
+        "workflow.expire_checked", extra={"request_id": str(job.request_id), "result": result}
+    )
+    return result
+
+
+def run_escalate(session_factory, provider, settings, job, worker_id, *, now=None) -> str:
+    from app.services.escalation_service import run_escalation_round
+
+    with session_factory() as session, transaction(session):
+        row = _owned_job(session, job, worker_id)
+        if row is None:
+            return "lease_lost"
+        result, next_run = run_escalation_round(
+            session, settings, _require(job.request_id), now or utcnow()
+        )
+        _finish_request_job(row, next_run)
+    logger.info(
+        "workflow.escalation_round", extra={"request_id": str(job.request_id), "result": result}
+    )
+    return result
+
+
+def _voice_unavailable(session_factory, job: ClaimedJob, worker_id: str) -> str:
+    """A voice job exists but no provider is configured: fail it, never pretend."""
+    with session_factory() as session, transaction(session):
+        row = _owned_job(session, job, worker_id)
+        if job.job_type == JobType.INITIATE_CALL and job.voice_call_id is not None:
+            call = session.get(VoiceCall, job.voice_call_id, with_for_update=True)
+            if call is not None and call.status == CallStatus.QUEUED.value:
+                _end_call(session, call, CallStatus.FAILED, "voice_unavailable")
+        _fail(row, "voice_unavailable")
+    return "voice_unavailable"
+
+
 HANDLERS = {
     JobType.INITIATE_CALL: run_initiate,
     JobType.PROCESS_EVENT: run_process_event,
     JobType.RECONCILE_CALL: run_reconcile,
 }
+REQUEST_HANDLERS = {
+    JobType.EXPIRE_REQUEST: run_expire,
+    JobType.ESCALATE_REQUEST: run_escalate,
+}
 
 
 def run_pending_jobs(
     session_factory: sessionmaker[Session],
-    provider: VoiceProvider,
+    provider: VoiceProvider | None,
     settings: Settings,
     worker_id: str,
     *,
     max_jobs: int = 100,
     now: datetime | None = None,
 ) -> list[tuple[str, str]]:
-    """Claim and run jobs until none is due (or ``max_jobs``). Returns (type, result)."""
+    """Claim and run jobs until none is due (or ``max_jobs``). Returns (type, result).
+
+    ``provider`` may be None when voice is disabled: request jobs (deadlines, escalation
+    rounds) still run; voice jobs fail with ``voice_unavailable``.
+    """
     results: list[tuple[str, str]] = []
     for _ in range(max_jobs):
         with session_factory() as session:
@@ -544,7 +617,14 @@ def run_pending_jobs(
         if job is None:
             break
         try:
-            result = HANDLERS[job.job_type](session_factory, provider, settings, job, worker_id)
+            if job.job_type in REQUEST_HANDLERS:
+                result = REQUEST_HANDLERS[job.job_type](
+                    session_factory, provider, settings, job, worker_id, now=now
+                )
+            elif provider is None:
+                result = _voice_unavailable(session_factory, job, worker_id)
+            else:
+                result = HANDLERS[job.job_type](session_factory, provider, settings, job, worker_id)
         except Exception:
             # Unexpected bug: release the job for a later retry rather than losing it.
             logger.exception("voice.job_crashed", extra={"job_id": str(job.id)})

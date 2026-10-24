@@ -50,27 +50,61 @@ class ApproverRead(ApiOutput):
     created_at: datetime
 
 
+ApprovalModeField = Literal["unanimous", "quorum"]
+VetoModeField = Literal["any_rejection", "designated", "none"]
+DeadlineSeconds = Annotated[int, Field(ge=60, le=30 * 24 * 3600)]
+EscalationSeconds = Annotated[int, Field(ge=60, le=7 * 24 * 3600)]
+
+
 class PolicyCreate(StrictInput):
+    """Defaults reproduce Chunk 1 behaviour: unanimous, any rejection vetoes, no backups,
+    no deadline, no escalation."""
+
     name: Name
     description: Description | None = None
+    approval_mode: ApprovalModeField = "unanimous"
     required_approvals: Literal[1, 2]
-    # Count and distinctness are checked by the policy service so that every assignment
-    # problem produces the same `approval_policy_invalid` error.
+    # Primary approvers (the seats). Count and distinctness are checked by the policy
+    # service so that every assignment problem produces `approval_policy_invalid`.
     approver_ids: list[UUID] = Field(min_length=1, max_length=10)
+    veto_mode: VetoModeField = "any_rejection"
+    veto_approver_ids: list[UUID] = Field(default_factory=list, max_length=10)
+    backup_approver_ids: list[UUID] = Field(default_factory=list, max_length=10)
+    decision_deadline_seconds: DeadlineSeconds | None = None
+    escalation_after_seconds: EscalationSeconds | None = None
+    max_escalations: Annotated[int, Field(ge=0, le=3)] | None = None
 
 
 class PolicyUpdate(StrictInput):
     name: Name | None = None
     description: Description | None = None
     is_active: bool | None = None
+    approval_mode: ApprovalModeField | None = None
     required_approvals: Literal[1, 2] | None = None
     approver_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=10)
+    veto_mode: VetoModeField | None = None
+    veto_approver_ids: list[UUID] | None = Field(default=None, max_length=10)
+    backup_approver_ids: list[UUID] | None = Field(default=None, max_length=10)
+    # null clears these (no deadline / no escalation).
+    decision_deadline_seconds: DeadlineSeconds | None = None
+    escalation_after_seconds: EscalationSeconds | None = None
+    max_escalations: Annotated[int, Field(ge=0, le=3)] | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> Self:
         if not self.model_fields_set:
             raise ValueError("at least one field must be provided")
-        for field in ("name", "is_active", "required_approvals", "approver_ids"):
+        for field in (
+            "name",
+            "is_active",
+            "approval_mode",
+            "required_approvals",
+            "approver_ids",
+            "veto_mode",
+            "veto_approver_ids",
+            "backup_approver_ids",
+            "max_escalations",
+        ):
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError(f"{field} cannot be null")
         return self
@@ -86,9 +120,16 @@ class PolicyRead(ApiOutput):
     id: UUID
     name: str
     description: str | None
+    approval_mode: str
     required_approvals: int
+    veto_mode: str
     is_active: bool
     version: int
     approvers: list[PolicyApproverRead]
+    veto_approver_ids: list[UUID]
+    backup_approvers: list[PolicyApproverRead]
+    decision_deadline_seconds: int | None
+    escalation_after_seconds: int | None
+    max_escalations: int
     created_at: datetime
     updated_at: datetime

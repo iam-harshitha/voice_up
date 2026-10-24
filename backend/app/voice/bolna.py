@@ -86,6 +86,24 @@ def _answer(block: Any) -> tuple[ExtractedAnswer | None, bool]:
     return ExtractedAnswer(value, float(confidence) if confidence is not None else None), False
 
 
+MAX_CONDITION_TEXT = 500
+
+
+def _free_text(block: Any) -> tuple[str | None, bool]:
+    """Read a free-text extraction (its ``subjective`` answer). Returns (text, malformed)."""
+    if block is None:
+        return None, False
+    if not isinstance(block, dict):
+        return None, True
+    text = block.get("subjective")
+    if text is None:
+        return None, False
+    if not isinstance(text, str):
+        return None, True
+    text = " ".join(text.split())[:MAX_CONDITION_TEXT]
+    return text or None, False
+
+
 def normalize_execution(payload: Any, settings: Settings) -> ProviderExecution:
     """Convert a Bolna execution object into the internal representation."""
     if not isinstance(payload, dict):
@@ -113,6 +131,7 @@ def normalize_execution(payload: Any, settings: Settings) -> ProviderExecution:
     correlation = recipient_data.get(CORRELATION_VARIABLE)
 
     decision = identity = None
+    condition_text = None
     malformed = False
     extracted = payload.get("extracted_data")
     if extracted is not None:
@@ -125,7 +144,10 @@ def normalize_execution(payload: Any, settings: Settings) -> ProviderExecution:
             elif isinstance(category, dict):
                 decision, bad_decision = _answer(category.get(settings.bolna_decision_extraction))
                 identity, bad_identity = _answer(category.get(settings.bolna_identity_extraction))
-                malformed = bad_decision or bad_identity
+                condition_text, bad_condition = _free_text(
+                    category.get(settings.bolna_condition_extraction)
+                )
+                malformed = bad_decision or bad_identity or bad_condition
 
     return ProviderExecution(
         provider_call_id=execution_id,
@@ -137,6 +159,7 @@ def normalize_execution(payload: Any, settings: Settings) -> ProviderExecution:
         correlation_id=correlation if isinstance(correlation, str) else None,
         decision=decision,
         identity=identity,
+        condition_text=condition_text,
         extraction_malformed=malformed,
     )
 
