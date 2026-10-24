@@ -7,6 +7,7 @@ from app.db.models.approval_vote import ApprovalVote
 from app.db.models.approver import Approver
 from app.db.models.audit_event import AuditEvent
 from app.db.models.organization import Organization
+from app.db.models.voice import VoiceCall, VoiceJob, VoiceProviderEvent
 
 __all__ = [
     "ApiKey",
@@ -17,4 +18,7 @@ __all__ = [
     "AuditEvent",
     "Organization",
     "PolicyApprover",
+    "VoiceCall",
+    "VoiceJob",
+    "VoiceProviderEvent",
 ]

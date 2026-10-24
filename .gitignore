@@ -22,3 +22,6 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local mock voice state (development only)
+.mock_voice/

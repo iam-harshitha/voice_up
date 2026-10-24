@@ -1,6 +1,14 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import approvers, health, policies, requests, votes
+from app.api.v1.endpoints import (
+    approvers,
+    health,
+    policies,
+    requests,
+    voice_calls,
+    voice_webhooks,
+    votes,
+)
 from app.schemas.common import ErrorResponse
 
 # Documented error shape for every non-health endpoint.
@@ -12,3 +20,5 @@ api_router.include_router(approvers.router, responses=_ERRORS)
 api_router.include_router(policies.router, responses=_ERRORS)
 api_router.include_router(requests.router, responses=_ERRORS)
 api_router.include_router(votes.router, responses=_ERRORS)
+api_router.include_router(voice_calls.router, responses=_ERRORS)
+api_router.include_router(voice_webhooks.router)

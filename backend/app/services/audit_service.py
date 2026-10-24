@@ -19,6 +19,13 @@ class AuditEventType(StrEnum):
     VOTE_RECORDED = "vote.recorded"
     REQUEST_APPROVED = "request.approved"
     REQUEST_REJECTED = "request.rejected"
+    VOICE_CALL_SCHEDULED = "voice.call_scheduled"
+    VOICE_CALL_INITIATION_ATTEMPTED = "voice.call_initiation_attempted"
+    VOICE_CALL_INITIATED = "voice.call_initiated"
+    VOICE_CALL_FAILED = "voice.call_failed"
+    VOICE_DECISION_ACCEPTED = "voice.decision_accepted"
+    VOICE_DECISION_REJECTED = "voice.decision_rejected"
+    VOICE_EVENT_IGNORED = "voice.event_ignored"
 
 
 def record_event(

@@ -6,8 +6,10 @@ approvers. The agent submits a request. Approvers' votes are recorded, and a
 deterministic policy engine decides `pending` → `approved` / `rejected`. The agent reads
 the result over a REST API.
 
-This chunk is the backend only. Bolna voice calls, the dashboard, MCP and background
-workers come in later chunks.
+Chunk 2 adds voice approvals: Approval Line calls each approver through Bolna, and
+turns a verified, explicit spoken decision into a vote through the same approval
+service. See **[docs/voice-bolna.md](docs/voice-bolna.md)** for the design, the verified
+Bolna contract, setup and limitations. The dashboard and MCP come in later chunks.
 
 ## Requirements
 
@@ -119,6 +121,8 @@ Send it as the `X-API-Key` header.
 | `requests:create` | submit an approval request |
 | `requests:read` | list/get requests and their decision |
 | `votes:write` | record a vote (trusted integration only, see below) |
+| `voice:calls:create` | schedule approval phone calls for a request |
+| `voice:calls:read` | read a request's call status and outcomes |
 
 An agent key should have only `requests:create,requests:read`. It must never hold
 `votes:write` or `policies:write`.
@@ -138,6 +142,9 @@ An agent key should have only `requests:create,requests:read`. It must never hol
 | `POST /requests` | requests:create | `policy_id`, `action`, `summary`, `context` (object, ≤16 KB) |
 | `GET /requests`, `GET /requests/{id}` | requests:read | `?status=pending\|approved\|rejected` |
 | `POST /requests/{id}/votes` | votes:write | `approver_id`, `vote` = approve\|reject; 201 new, 200 identical repeat |
+| `POST /requests/{id}/voice-calls` | voice:calls:create | one call per snapshotted approver; 201 new, 200 already scheduled; optional `{"redial_unanswered": true}` |
+| `GET /requests/{id}/voice-calls` | voice:calls:read | call status, attempts, decision status, outcome (no phone numbers) |
+| `POST /voice/webhooks/bolna` | `X-Approval-Line-Webhook-Token` header | Bolna deliveries; not API-key authenticated |
 
 List endpoints take `limit` (1–100, default 50) and `offset` (0–10000). Results are
 ordered newest first, with ties broken by ID.
@@ -161,8 +168,23 @@ found in your organization, 409 conflicting or late vote, 422 schema validation,
 
 > **Trust boundary:** `POST /requests/{id}/votes` trusts the caller's `approver_id`.
 > The approver is not independently authenticated. Only give `votes:write` to trusted
-> operators and test harnesses. Chunk 2 replaces this for voice votes with an
-> authenticated Bolna event flow and a verified call-to-approver mapping.
+> operators and test harnesses. Voice votes do not use this endpoint: they come from
+> the authenticated webhook flow and the persisted call-to-approver mapping (see
+> docs/voice-bolna.md).
+
+## Voice worker
+
+Calls are placed and provider events are processed by a separate worker process. It
+uses a PostgreSQL job queue; run as many workers as you like.
+
+```powershell
+python -m app.workers.voice_worker            # long-running; Ctrl+C stops after the current job
+python -m app.workers.voice_worker --once     # drain due jobs and exit
+```
+
+Voice is off by default (`VOICE_PROVIDER=disabled`). To try the whole flow locally
+without Bolna credentials, use the mock provider and `python -m app.cli voice-simulate`,
+as described in [docs/voice-bolna.md](docs/voice-bolna.md#local-development-without-credentials).
 
 ## Manual end-to-end check
 
@@ -240,11 +262,12 @@ app/cli.py                    org / API-key bootstrap
 - Policies and organizations are never deleted, only deactivated. All foreign keys are
   `RESTRICT`.
 
-## Before Chunk 2
+## Remaining work
 
-- Replace caller-asserted `approver_id` voting with authenticated provider webhooks
-  (signature check, idempotent event IDs, call→approver mapping).
-- Add request expiry/timeouts. They must resolve to a non-approval state.
-- Store call evidence (recordings, transcripts) linked to votes and audit events.
-- Add an audit-event read endpoint for the dashboard timeline (order by `sequence`).
-- Consider key rotation metadata (last-used, expiry) on `api_keys`.
+- Run the live Bolna verification checklist in docs/voice-bolna.md (no real call has
+  been placed yet).
+- Stronger approver verification for voice (e.g. a spoken PIN) before production use.
+- Separate migration-owner and runtime database roles, so the runtime role can only
+  `INSERT`/`SELECT` audit events.
+- An audit-event read endpoint for the dashboard timeline (order by `sequence`).
+- Key rotation metadata (last used, expiry) on `api_keys`.

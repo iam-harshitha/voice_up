@@ -8,9 +8,10 @@ Approval Line: human authorization for AI agents. An agent submits an approval r
 A one- or two-person policy decides it from approvers' votes, and the agent reads back
 `pending` / `approved` / `rejected`. Development is in chunks:
 
-- **Chunk 1 (done):** the backend in `backend/`.
-- **Later:** Bolna phone calls to approvers, a React dashboard with a decision timeline
-  and call evidence, and MCP integration.
+- **Chunk 1 (done):** the core approval backend in `backend/`.
+- **Chunk 2 (done, mock-verified only):** Bolna voice calls to approvers
+  (`backend/docs/voice-bolna.md`). No live Bolna call has been tested yet.
+- **Later:** a React dashboard with a decision timeline and call evidence, and MCP.
 
 Don't build later-chunk features while working on an earlier one.
 
@@ -32,6 +33,8 @@ python -m app.cli create-org --name X --key "agent=requests:create,requests:read
 pytest                          # all tests; integration tests use TEST_DATABASE_URL
 pytest tests/integration/test_votes.py::TestConcurrency::test_concurrent_duplicate_votes_record_once
 pytest -m "not integration"     # no database needed
+python -m app.workers.voice_worker --once     # process voice jobs (needs VOICE_PROVIDER)
+python -m app.cli voice-simulate --call-id <id> --decision approve   # mock + dev only
 ruff check . ; ruff format .
 ```
 
@@ -76,8 +79,29 @@ Invariants that span several files:
   `status`, `organization_id`, a snapshot, and so on.
 
 `POST /requests/{id}/votes` trusts the caller's `approver_id`; that is why `votes:write`
-is never in the agent scopes. Chunk 2 must put an authenticated Bolna webhook →
-call-to-approver mapping in front of `cast_vote` rather than reuse this endpoint.
+is never in the agent scopes. Voice votes never use it.
+
+Voice subsystem invariants (see `backend/docs/voice-bolna.md`):
+
+- Only `app/voice/bolna.py` knows Bolna field names; everything else uses
+  `app/voice/base.py` types. `app/voice/decision.py` is pure and is the only place a
+  call becomes a vote *candidate*; the policy engine still decides the request.
+- Webhooks are signals only: stored in `voice_provider_events` (deduplicated) and
+  acknowledged after commit. For terminal statuses the worker re-fetches the execution
+  with our API key; decisions are never read from a webhook body.
+- `voice_webhook_service.apply_execution` is the single transaction for lifecycle,
+  decision, `approval_service.record_vote` (in a savepoint), audit events and marking
+  the event processed. Lock order: request, then call.
+- Never hold a DB transaction across a provider HTTP call (three phases in
+  `voice_job_service.run_initiate`). Ambiguous initiation → call `unknown`, never
+  re-dialled automatically; re-dial is only the explicit `redial_unanswered` action.
+- Call lifecycle is monotonic (`can_transition`). A DB trigger keeps a call bound to its
+  request, approver, organization and provider, and lets `provider_call_id` be set once.
+- List calls in snapshot order, never by `created_at` alone (calls scheduled together
+  share it); the same applies to audit events (`sequence`).
+- `VOICE_PROVIDER=mock` is refused in production; never fall back to the mock.
+- Test fixtures' admin key has an explicit scope list; never derive roles as "all
+  scopes minus some", or new scopes leak in.
 
 ## Conventions
 

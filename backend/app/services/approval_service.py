@@ -136,111 +136,140 @@ def cast_vote(
     """
     try:
         with transaction(session):
-            request = session.scalar(
-                select(ApprovalRequest)
-                .where(
-                    ApprovalRequest.id == request_id,
-                    ApprovalRequest.organization_id == organization_id,
-                )
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-            if request is None:
-                raise NotFoundError("Approval request not found.", code="request_not_found")
-
-            # Authorization comes from the snapshot taken at creation, never the live policy.
-            authorized = request.authorized_approver_ids
-            if approver_id not in authorized:
-                raise BusinessRuleError(
-                    "This approver is not authorized to vote on this request.",
-                    code="approver_not_authorized",
-                )
-
-            existing = session.scalar(
-                select(ApprovalVote).where(
-                    ApprovalVote.request_id == request.id, ApprovalVote.approver_id == approver_id
-                )
-            )
-            if existing is not None:
-                if existing.vote == choice.value:
-                    return VoteOutcome(existing, request, created=False)
-                raise ConflictError(
-                    "This approver has already cast a different vote.", code="vote_conflict"
-                )
-
-            if request.status != RequestStatus.PENDING.value:
-                raise ConflictError(
-                    f"The request has already been {request.status}.",
-                    code="request_already_decided",
-                )
-
-            approver = session.scalar(
-                select(Approver)
-                .where(Approver.id == approver_id, Approver.organization_id == organization_id)
-                # FOR SHARE: the approver cannot be deactivated between this check and commit.
-                .with_for_update(read=True)
-            )
-            if approver is None or not approver.is_active:
-                raise BusinessRuleError(
-                    "This approver is inactive and cannot vote.", code="approver_inactive"
-                )
-
-            vote = ApprovalVote(
-                organization_id=organization_id,
-                request_id=request.id,
-                approver_id=approver_id,
-                vote=choice.value,
-            )
-            session.add(vote)
-            session.flush()
-            audit_service.record_event(
-                session,
-                organization_id=organization_id,
-                request_id=request.id,
-                event_type=AuditEventType.VOTE_RECORDED,
-                data={"vote_id": str(vote.id), "approver_id": str(approver_id), "vote": vote.vote},
-            )
-
-            all_votes = session.scalars(
-                select(ApprovalVote).where(ApprovalVote.request_id == request.id)
-            ).all()
-            try:
-                status = next_status(
-                    RequestStatus(request.status),
-                    request.required_approvals,
-                    [CastVote(v.approver_id, VoteChoice(v.vote)) for v in all_votes],
-                    authorized,
-                )
-            except IllegalTransitionError as exc:  # pragma: no cover - guarded above
-                raise ConflictError(str(exc), code="request_already_decided") from exc
-
-            now = utcnow()
-            request.updated_at = now
-            if status is not RequestStatus.PENDING:
-                request.status = status.value
-                request.decided_at = now
-                audit_service.record_event(
-                    session,
-                    organization_id=organization_id,
-                    request_id=request.id,
-                    event_type=(
-                        AuditEventType.REQUEST_APPROVED
-                        if status is RequestStatus.APPROVED
-                        else AuditEventType.REQUEST_REJECTED
-                    ),
-                    data={
-                        "decisive_vote_id": str(vote.id),
-                        "approve_votes": sum(v.vote == VoteChoice.APPROVE for v in all_votes),
-                        "reject_votes": sum(v.vote == VoteChoice.REJECT for v in all_votes),
-                        "required_approvals": request.required_approvals,
-                    },
-                )
-            session.flush()
-            return VoteOutcome(vote, request, created=True)
+            return record_vote(session, organization_id, request_id, approver_id, choice)
     except IntegrityError as exc:
-        constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
-        if constraint == VOTE_UNIQUE_CONSTRAINT:
+        if _is_vote_unique_violation(exc):
             raise ConflictError(
                 "A vote from this approver was recorded concurrently.", code="vote_conflict"
             ) from exc
         raise
+
+
+def _is_vote_unique_violation(exc: IntegrityError) -> bool:
+    constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+    return constraint == VOTE_UNIQUE_CONSTRAINT
+
+
+def record_vote(
+    session: Session,
+    organization_id: UUID,
+    request_id: UUID,
+    approver_id: UUID,
+    choice: VoteChoice,
+    *,
+    source: str = "api",
+    source_details: dict[str, str] | None = None,
+) -> VoteOutcome:
+    """Validate and apply a vote inside the caller's open transaction (no commit).
+
+    Every rejection (AppError) is raised before anything is written, so a caller may
+    catch it and continue its own transaction. Callers that need to survive an
+    IntegrityError should wrap this in a savepoint (``session.begin_nested()``).
+    """
+    request = session.scalar(
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.id == request_id,
+            ApprovalRequest.organization_id == organization_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if request is None:
+        raise NotFoundError("Approval request not found.", code="request_not_found")
+
+    # Authorization comes from the snapshot taken at creation, never the live policy.
+    authorized = request.authorized_approver_ids
+    if approver_id not in authorized:
+        raise BusinessRuleError(
+            "This approver is not authorized to vote on this request.",
+            code="approver_not_authorized",
+        )
+
+    existing = session.scalar(
+        select(ApprovalVote).where(
+            ApprovalVote.request_id == request.id, ApprovalVote.approver_id == approver_id
+        )
+    )
+    if existing is not None:
+        if existing.vote == choice.value:
+            return VoteOutcome(existing, request, created=False)
+        raise ConflictError(
+            "This approver has already cast a different vote.", code="vote_conflict"
+        )
+
+    if request.status != RequestStatus.PENDING.value:
+        raise ConflictError(
+            f"The request has already been {request.status}.",
+            code="request_already_decided",
+        )
+
+    approver = session.scalar(
+        select(Approver)
+        .where(Approver.id == approver_id, Approver.organization_id == organization_id)
+        # FOR SHARE: the approver cannot be deactivated between this check and commit.
+        .with_for_update(read=True)
+    )
+    if approver is None or not approver.is_active:
+        raise BusinessRuleError(
+            "This approver is inactive and cannot vote.", code="approver_inactive"
+        )
+
+    vote = ApprovalVote(
+        organization_id=organization_id,
+        request_id=request.id,
+        approver_id=approver_id,
+        vote=choice.value,
+    )
+    session.add(vote)
+    session.flush()
+    audit_service.record_event(
+        session,
+        organization_id=organization_id,
+        request_id=request.id,
+        event_type=AuditEventType.VOTE_RECORDED,
+        data={
+            "vote_id": str(vote.id),
+            "approver_id": str(approver_id),
+            "vote": vote.vote,
+            "source": source,
+            **(source_details or {}),
+        },
+    )
+
+    all_votes = session.scalars(
+        select(ApprovalVote).where(ApprovalVote.request_id == request.id)
+    ).all()
+    try:
+        status = next_status(
+            RequestStatus(request.status),
+            request.required_approvals,
+            [CastVote(v.approver_id, VoteChoice(v.vote)) for v in all_votes],
+            authorized,
+        )
+    except IllegalTransitionError as exc:  # pragma: no cover - guarded above
+        raise ConflictError(str(exc), code="request_already_decided") from exc
+
+    now = utcnow()
+    request.updated_at = now
+    if status is not RequestStatus.PENDING:
+        request.status = status.value
+        request.decided_at = now
+        audit_service.record_event(
+            session,
+            organization_id=organization_id,
+            request_id=request.id,
+            event_type=(
+                AuditEventType.REQUEST_APPROVED
+                if status is RequestStatus.APPROVED
+                else AuditEventType.REQUEST_REJECTED
+            ),
+            data={
+                "decisive_vote_id": str(vote.id),
+                "approve_votes": sum(v.vote == VoteChoice.APPROVE for v in all_votes),
+                "reject_votes": sum(v.vote == VoteChoice.REJECT for v in all_votes),
+                "required_approvals": request.required_approvals,
+            },
+        )
+    session.flush()
+    return VoteOutcome(vote, request, created=True)

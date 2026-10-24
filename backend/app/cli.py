@@ -72,7 +72,74 @@ def _build_parser() -> argparse.ArgumentParser:
 
     revoke = commands.add_parser("revoke-key", help="Revoke a key immediately.")
     revoke.add_argument("--key-id", required=True, type=UUID)
+
+    simulate = commands.add_parser(
+        "voice-simulate",
+        help="DEVELOPMENT ONLY: finish a mock call and deliver its webhook to a running API.",
+        description=(
+            "Requires VOICE_PROVIDER=mock, VOICE_MOCK_STATE_DIR and a non-production APP_ENV. "
+            "Completes the simulated Bolna execution for a voice call and POSTs it to the "
+            "API's real, token-authenticated webhook endpoint."
+        ),
+    )
+    simulate.add_argument("--call-id", required=True, type=UUID, help="Voice call ID.")
+    simulate.add_argument(
+        "--decision",
+        default="approve",
+        help="Extracted decision: approve, reject, uncertain, needs_clarification, or none.",
+    )
+    simulate.add_argument("--identity", default="yes", help="Identity confirmed: yes/no/none.")
+    simulate.add_argument("--confidence", type=float, default=0.95)
+    simulate.add_argument(
+        "--status", default="completed", help="Final Bolna status (e.g. completed, no-answer)."
+    )
+    simulate.add_argument("--api-url", default="http://127.0.0.1:8000")
     return parser
+
+
+def _voice_simulate(args: argparse.Namespace, settings) -> None:
+    import httpx
+
+    from app.api.v1.endpoints.voice_webhooks import WEBHOOK_TOKEN_HEADER
+    from app.voice.mock import MockVoiceProvider
+
+    if (
+        settings.voice_provider != "mock"
+        or settings.app_env == "production"
+        or not settings.voice_mock_state_dir
+        or settings.voice_webhook_token is None
+    ):
+        raise CliError(
+            "voice-simulate needs VOICE_PROVIDER=mock, VOICE_MOCK_STATE_DIR, "
+            "VOICE_WEBHOOK_TOKEN and a non-production APP_ENV"
+        )
+    mock = MockVoiceProvider(settings)
+    execution = mock.execution_for(str(args.call_id))
+    if execution is None:
+        raise CliError("no simulated execution for that call (has the worker dialled it?)")
+
+    def optional(value: str) -> str | None:
+        return None if value.lower() == "none" else value
+
+    if args.status == "completed":
+        payload = mock.complete(
+            execution["id"],
+            decision=optional(args.decision),
+            identity=optional(args.identity),
+            confidence=args.confidence,
+            identity_confidence=args.confidence,
+        )
+    else:
+        payload = mock.set_status(execution["id"], args.status)
+    response = httpx.post(
+        f"{args.api_url.rstrip('/')}{settings.api_v1_prefix}/voice/webhooks/bolna",
+        json=payload,
+        headers={WEBHOOK_TOKEN_HEADER: settings.voice_webhook_token.get_secret_value()},
+        timeout=10,
+    )
+    print(f"webhook delivered: HTTP {response.status_code} {response.text}")
+    if response.status_code != 200:
+        raise CliError("the API did not accept the simulated webhook")
 
 
 def _print_issued(key: IssuedApiKey) -> None:
@@ -88,6 +155,9 @@ def _run(args: argparse.Namespace) -> None:
         raise CliError(
             f"invalid configuration (check DATABASE_URL): {exc.errors()[0]['msg']}"
         ) from exc
+    if args.command == "voice-simulate":
+        _voice_simulate(args, settings)
+        return
     engine = build_engine(settings)
     session = build_session_factory(engine)()
     try:

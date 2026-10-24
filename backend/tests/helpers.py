@@ -74,3 +74,31 @@ def vote(client: TestClient, tenant: Tenant, request_id: str, approver_id: str, 
         json={"approver_id": approver_id, "vote": choice},
         headers=tenant.voter,
     )
+
+
+# --- Voice helpers ---------------------------------------------------------------------
+
+
+def schedule_calls(client: TestClient, tenant: Tenant, request_id: str, **body: object):
+    return client.post(
+        f"{API}/requests/{request_id}/voice-calls",
+        json=body or None,
+        headers=tenant.headers("voice"),
+    )
+
+
+def list_calls(client: TestClient, tenant: Tenant, request_id: str) -> list[dict]:
+    response = client.get(
+        f"{API}/requests/{request_id}/voice-calls", headers=tenant.headers("voice")
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["calls"]
+
+
+def deliver_webhook(client: TestClient, payload: object, token: str | None, **headers: str):
+    sent = {"Content-Type": "application/json", **headers}
+    if token is not None:
+        sent["X-Approval-Line-Webhook-Token"] = token
+    import json
+
+    return client.post(f"{API}/voice/webhooks/bolna", content=json.dumps(payload), headers=sent)

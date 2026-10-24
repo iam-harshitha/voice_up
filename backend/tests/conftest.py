@@ -6,23 +6,27 @@ unless the database name contains "test" and differs from DATABASE_URL.
 """
 
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import Engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
-from app.core.security import AGENT_SCOPES, ALL_SCOPES, Scope
-from app.db.base import Base
+from app.core.security import AGENT_SCOPES, Scope
+from app.db.base import Base, utcnow
 from app.db.session import build_engine, build_session_factory, transaction
 from app.main import create_app
 from app.services import api_key_service
+from app.services.voice_job_service import run_pending_jobs
+from app.voice.mock import MockVoiceProvider
 from tests.helpers import Tenant, create_approver, create_policy
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -110,7 +114,16 @@ def client(test_settings: Settings, engine: Engine) -> Iterator[TestClient]:
         yield test_client
 
 
-ADMIN_SCOPES = sorted(ALL_SCOPES - {Scope.VOTES_WRITE.value, Scope.REQUESTS_CREATE.value})
+# Explicit list (not "all minus some") so new scopes never leak into this role.
+ADMIN_SCOPES = sorted(
+    {
+        Scope.POLICIES_READ.value,
+        Scope.POLICIES_WRITE.value,
+        Scope.APPROVERS_READ.value,
+        Scope.APPROVERS_WRITE.value,
+        Scope.REQUESTS_READ.value,
+    }
+)
 
 
 @pytest.fixture
@@ -147,3 +160,52 @@ def two_approver_setup(client: TestClient, tenant: Tenant) -> dict:
     bob = create_approver(client, tenant, "Bob")
     policy = create_policy(client, tenant, [alice["id"], bob["id"]])
     return {"alice": alice, "bob": bob, "policy": policy}
+
+
+# --- Voice (Chunk 2) -------------------------------------------------------------------
+
+WEBHOOK_TOKEN = "test-webhook-token-" + "x" * 32  # fixture value, not a real secret
+VOICE_SCOPES = ["voice:calls:create", "voice:calls:read"]
+
+
+@pytest.fixture
+def voice_settings(test_settings: Settings) -> Settings:
+    return test_settings.model_copy(
+        update={
+            "voice_provider": "mock",
+            "voice_webhook_token": SecretStr(WEBHOOK_TOKEN),
+            "voice_retry_base_seconds": 1.0,
+            "voice_retry_max_seconds": 4.0,
+            "voice_job_max_attempts": 3,
+            "voice_webhook_max_bytes": 4096,
+        }
+    )
+
+
+@pytest.fixture
+def mock_provider(voice_settings: Settings) -> MockVoiceProvider:
+    return MockVoiceProvider(voice_settings)
+
+
+@pytest.fixture
+def voice_client(voice_settings: Settings, engine: Engine) -> Iterator[TestClient]:
+    with TestClient(create_app(voice_settings)) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def voice_tenant(make_tenant: Callable[..., Tenant]) -> Tenant:
+    return make_tenant(voice=VOICE_SCOPES)
+
+
+@pytest.fixture
+def run_worker(session_factory, mock_provider, voice_settings):
+    """Drain due jobs; ``later`` claims jobs scheduled for the future (backoff)."""
+
+    def run(*, later: float = 0.0, worker_id: str = "test-worker", provider=None):
+        now = utcnow() + timedelta(seconds=later)
+        return run_pending_jobs(
+            session_factory, provider or mock_provider, voice_settings, worker_id, now=now
+        )
+
+    return run
