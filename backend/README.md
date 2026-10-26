@@ -15,7 +15,12 @@ Chunk 3 adds quorum and veto policies, backup approvers with durable time-based
 escalation, decision deadlines, conditional approvals that can never authorize by
 themselves, policy audit events, and an audit timeline API. The exact semantics,
 states, endpoints and a walkthrough are in **[docs/policies.md](docs/policies.md)**.
-The dashboard and MCP come in later chunks.
+
+Chunk 4 adds the operator dashboard (`../frontend`, with browser sign-in via HttpOnly
+session cookies and CSRF protection), an MCP server that exposes approval tools to
+agents, and a demo agent that only performs a simulated deployment after an explicit,
+matching authorization. See **[docs/dashboard-mcp.md](docs/dashboard-mcp.md)**, which
+also has the full end-to-end demo procedure.
 
 ## Requirements
 
@@ -148,7 +153,10 @@ An agent key should have only `requests:create,requests:read`. It must never hol
 | `GET /policies`, `GET /policies/{id}` | policies:read | `?is_active=` filter |
 | `PATCH /policies/{id}` | policies:write | any change bumps `version` |
 | `POST /requests` | requests:create | `policy_id`, `action`, `summary`, `context` (object, ≤16 KB) |
-| `GET /requests`, `GET /requests/{id}` | requests:read | `?status=pending\|approved\|rejected\|expired`; detail includes `evaluation` and `expires_at` |
+| `GET /requests`, `GET /requests/{id}` | requests:read | `?status=pending\|approved\|rejected\|expired`, `?include_evaluation=true`; detail includes `evaluation`, `expires_at`, snapshot `policy` and named `approvers` |
+| `GET /requests/stats` | requests:read | exact counts by status, plus engine-derived condition/re-approval/deadline counts (bounded; see `evaluation_complete`) |
+| `GET /audit-events/recent` | audit:read | newest organization events, `?limit≤50` |
+| `POST /auth/login`, `GET /auth/session`, `POST /auth/logout` | dashboard credentials | browser sign-in (HttpOnly cookie + `X-CSRF-Token`); see docs/dashboard-mcp.md |
 | `GET /requests/{id}/conditions`, `GET /requests/{id}/escalations` | requests:read | conditions and escalation steps |
 | `POST /requests/{id}/conditions` | votes:write | record a conditional approval (trusted integration) |
 | `POST /requests/{id}/conditions/{cid}/resolve` | conditions:resolve | `satisfied` \| `not_satisfied`, `note`, optional `evidence_reference` |
@@ -234,8 +242,13 @@ pytest tests/unit                       # pure policy engine, no DB
 pytest -m "not integration"             # everything that needs no DB
 pytest tests/integration/test_votes.py::TestConcurrency   # one class
 pytest -k conflicting_duplicate         # by name
+pytest tests/agents                     # MCP server, REST client, demo-agent gate (no DB)
+pytest tests/integration/test_chunk4_e2e.py   # mock-backed end-to-end (DB)
 ruff check . ; ruff format --check .
 ```
+
+Frontend checks run from `../frontend`: `npm run typecheck`, `npm test`, `npm run build`,
+`npm run check:bundle`.
 
 Integration tests **drop and rebuild the schema** of `TEST_DATABASE_URL` using the
 Alembic migrations. They refuse to run unless that database's name contains `test` and
@@ -250,7 +263,9 @@ app/services/                 business operations and transaction boundaries
 app/api/                      FastAPI routes; dependencies.py has auth/tenant/scope layers
 app/db/models/                SQLAlchemy models; migrations/ holds the Alembic history
 app/core/                     settings, API-key crypto, error format, JSON logging
-app/cli.py                    org / API-key bootstrap
+app/cli.py                    org / API-key / dashboard-user bootstrap, voice-simulate
+approval_line_agents/         MCP server, strict REST client, demo agent (talk to the API over HTTP)
+../frontend/                  React dashboard
 ```
 
 ## Design notes and assumptions
@@ -284,3 +299,6 @@ app/cli.py                    org / API-key bootstrap
 - Separate migration-owner and runtime database roles, so the runtime role can only
   `INSERT`/`SELECT` audit events.
 - Key rotation metadata (last used, expiry) on `api_keys`.
+- An `Idempotency-Key` for `POST /requests` (agents cannot safely retry an ambiguous
+  creation today; the MCP server and demo agent therefore never retry it).
+- Per-IP sign-in rate limiting, MFA/SSO, idle session timeout for the dashboard.

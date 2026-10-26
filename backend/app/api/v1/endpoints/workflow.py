@@ -16,6 +16,7 @@ from app.schemas.workflow import (
     ConditionResolve,
     ConditionResult,
     EscalationStepRead,
+    RecentAuditEvents,
     RequestStateRead,
 )
 from app.services import approval_service, audit_service, policy_service, voice_service
@@ -31,6 +32,7 @@ CanReadAudit = Annotated[OrganizationContext, Depends(require_scope(Scope.AUDIT_
 
 AuditAfter = Annotated[int, Query(ge=0)]
 AuditLimit = Annotated[int, Query(ge=1, le=200)]
+RecentLimit = Annotated[int, Query(ge=1, le=50)]
 
 
 def _result(session, outcome: ConditionOutcome) -> ConditionResult:
@@ -126,6 +128,14 @@ def request_audit_events(
     return AuditTimeline(
         items=[AuditEventRead.model_validate(e) for e in items], limit=limit, next_after=next_after
     )
+
+
+@router.get("/audit-events/recent")
+def recent_audit_events(
+    org: CanReadAudit, session: DbSession, limit: RecentLimit = 20
+) -> RecentAuditEvents:
+    items = audit_service.recent(session, org.organization_id, limit=limit)
+    return RecentAuditEvents(items=[AuditEventRead.model_validate(e) for e in items], limit=limit)
 
 
 @router.get("/policies/{policy_id}/audit-events")

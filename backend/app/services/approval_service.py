@@ -228,6 +228,81 @@ def list_requests(
     return list(items), total
 
 
+def list_request_approvers(
+    session: Session, request: ApprovalRequest
+) -> list[tuple[RequestApprover, str]]:
+    """The request's snapshot approvers (primaries, then backups) with display names."""
+    rows = session.execute(
+        select(RequestApprover, Approver.name)
+        .join(
+            Approver,
+            (Approver.id == RequestApprover.approver_id)
+            & (Approver.organization_id == RequestApprover.organization_id),
+        )
+        .where(
+            RequestApprover.request_id == request.id,
+            RequestApprover.organization_id == request.organization_id,
+        )
+        .order_by(RequestApprover.position)
+    ).all()
+    return [(row[0], row[1]) for row in rows]
+
+
+@dataclass(frozen=True)
+class RequestStats:
+    total: int
+    by_status: dict[str, int]
+    waiting_for_condition: int
+    awaiting_reapproval: int
+    deadline_passed: int
+    pending_evaluated: int
+    pending_total: int
+
+
+# Evaluation-derived dashboard counts look at no more than this many pending requests.
+STATS_PENDING_EVALUATION_LIMIT = 200
+
+
+def request_stats(session: Session, organization_id: UUID) -> RequestStats:
+    counts = dict(
+        session.execute(
+            select(ApprovalRequest.status, func.count())
+            .where(ApprovalRequest.organization_id == organization_id)
+            .group_by(ApprovalRequest.status)
+        ).all()
+    )
+    by_status = {status.value: int(counts.get(status.value, 0)) for status in RequestStatus}
+    pending = session.scalars(
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.organization_id == organization_id,
+            ApprovalRequest.status == RequestStatus.PENDING.value,
+        )
+        .order_by(ApprovalRequest.created_at.desc(), ApprovalRequest.id.desc())
+        .limit(STATS_PENDING_EVALUATION_LIMIT)
+    ).all()
+    now = utcnow()
+    condition = reapproval = deadline = 0
+    for request in pending:
+        # The same engine as everywhere else; the dashboard never computes decisions.
+        evaluation = evaluate(session, request, now)
+        if evaluation.deadline_passed:
+            deadline += 1
+        elif evaluation.condition_seats:
+            condition += 1
+        elif evaluation.reapproval_seats:
+            reapproval += 1
+    return RequestStats(
+        total=sum(by_status.values()),
+        by_status=by_status,
+        waiting_for_condition=condition,
+        awaiting_reapproval=reapproval,
+        deadline_passed=deadline,
+        pending_evaluated=len(pending),
+        pending_total=by_status[RequestStatus.PENDING.value],
+    )
+
+
 def list_conditions(
     session: Session, organization_id: UUID, request_id: UUID
 ) -> list[ApprovalCondition]:

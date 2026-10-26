@@ -65,6 +65,18 @@ def record_event(
     return event
 
 
+def recent(session: Session, organization_id: UUID, *, limit: int = 20) -> list[AuditEvent]:
+    """The organization's newest events, newest first (by ``sequence``)."""
+    return list(
+        session.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.organization_id == organization_id)
+            .order_by(AuditEvent.sequence.desc())
+            .limit(limit)
+        )
+    )
+
+
 def timeline(
     session: Session,
     organization_id: UUID,

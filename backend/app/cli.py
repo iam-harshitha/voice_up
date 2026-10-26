@@ -9,9 +9,14 @@ Examples:
     python -m app.cli create-key --org-id <uuid> --name voter --scopes votes:write
     python -m app.cli list-keys --org-id <uuid>
     python -m app.cli revoke-key --key-id <uuid>
+    python -m app.cli create-dashboard-user --org-id <uuid> --email ops@example.com \\
+        --name "Ops Lead" --scopes "requests:read,requests:create,policies:read,..."
+    python -m app.cli disable-dashboard-user --email ops@example.com
 """
 
 import argparse
+import getpass
+import os
 import sys
 from collections.abc import Sequence
 from uuid import UUID
@@ -23,7 +28,7 @@ from app.core.config import get_settings
 from app.core.errors import AppError
 from app.core.security import AGENT_SCOPES, ALL_SCOPES
 from app.db.session import build_engine, build_session_factory, transaction
-from app.services import api_key_service
+from app.services import api_key_service, dashboard_auth_service
 from app.services.api_key_service import IssuedApiKey
 
 _SCOPE_HELP = (
@@ -72,6 +77,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
     revoke = commands.add_parser("revoke-key", help="Revoke a key immediately.")
     revoke.add_argument("--key-id", required=True, type=UUID)
+
+    dash = commands.add_parser(
+        "create-dashboard-user",
+        help="Create a dashboard (browser) user with a password and scoped access.",
+        description=(
+            "The password is read from an interactive prompt, or from the environment "
+            "variable named by --password-env (never from the command line). votes:write "
+            "cannot be granted to dashboard users."
+        ),
+    )
+    dash.add_argument("--org-id", required=True, type=UUID)
+    dash.add_argument("--email", required=True)
+    dash.add_argument("--name", required=True, help="Display name.")
+    dash.add_argument("--scopes", required=True, help=_SCOPE_HELP)
+    dash.add_argument(
+        "--password-env",
+        metavar="VAR",
+        help="Read the password from this environment variable (for scripted setup).",
+    )
+
+    disable = commands.add_parser(
+        "disable-dashboard-user",
+        help="Deactivate a dashboard user and revoke its sessions and backing key.",
+    )
+    disable.add_argument("--email", required=True)
 
     simulate = commands.add_parser(
         "voice-simulate",
@@ -147,6 +177,18 @@ def _voice_simulate(args: argparse.Namespace, settings) -> None:
         raise CliError("the API did not accept the simulated webhook")
 
 
+def _read_password(args: argparse.Namespace) -> str:
+    if args.password_env:
+        value = os.environ.get(args.password_env)
+        if not value:
+            raise CliError(f"environment variable {args.password_env} is not set")
+        return value
+    first = getpass.getpass("Password (min 12 characters): ")
+    if first != getpass.getpass("Repeat password: "):
+        raise CliError("passwords do not match")
+    return first
+
+
 def _print_issued(key: IssuedApiKey) -> None:
     print(f"API key '{key.name}' (id {key.id})")
     print(f"  scopes: {', '.join(key.scopes)}")
@@ -187,6 +229,22 @@ def _run(args: argparse.Namespace) -> None:
             for key in api_key_service.list_api_keys(session, args.org_id):
                 state = f"revoked {key.revoked_at.isoformat()}" if key.revoked_at else "active"
                 print(f"{key.id}  {key.name:<24} {state:<34} {','.join(key.scopes)}")
+        elif args.command == "create-dashboard-user":
+            password = _read_password(args)
+            with transaction(session):
+                user = dashboard_auth_service.create_user(
+                    session,
+                    args.org_id,
+                    email=args.email,
+                    display_name=args.name,
+                    password=password,
+                    scopes=args.scopes,
+                )
+            print(f"Dashboard user '{user.email}' created (id {user.id})")
+        elif args.command == "disable-dashboard-user":
+            with transaction(session):
+                user = dashboard_auth_service.disable_user(session, args.email)
+            print(f"Dashboard user '{user.email}' disabled; sessions and backing key revoked")
         elif args.command == "revoke-key":
             with transaction(session):
                 key = api_key_service.revoke_api_key(session, args.key_id)

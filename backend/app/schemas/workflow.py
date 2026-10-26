@@ -67,9 +67,18 @@ class EscalationStepRead(ApiOutput):
 
 class AuditEventRead(ApiOutput):
     sequence: int
+    request_id: UUID | None
+    policy_id: UUID | None
     event_type: str
     event_data: dict[str, Any]
     created_at: datetime
+
+
+class RecentAuditEvents(BaseModel):
+    """The organization's newest audit events, newest first (dashboard activity feed)."""
+
+    items: list[AuditEventRead]
+    limit: int
 
 
 class AuditTimeline(BaseModel):

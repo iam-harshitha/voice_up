@@ -157,3 +157,54 @@ def audit_types(client: TestClient, tenant: Tenant, request_id: str) -> list[str
     )
     assert response.status_code == 200, response.text
     return [e["event_type"] for e in response.json()["items"]]
+
+
+# --- Chunk 4 helpers -------------------------------------------------------------------
+
+DASHBOARD_PASSWORD = "correct horse battery staple"
+
+# Everything a dashboard operator may hold (votes:write is never grantable).
+DASHBOARD_SCOPES = [
+    "approvers:read",
+    "approvers:write",
+    "audit:read",
+    "conditions:resolve",
+    "policies:read",
+    "policies:write",
+    "requests:create",
+    "requests:read",
+    "voice:calls:create",
+    "voice:calls:read",
+]
+
+
+def create_dashboard_user(
+    session_factory,
+    organization_id: UUID,
+    *,
+    email: str = "ops@example.com",
+    scopes: list[str] | None = None,
+    password: str = DASHBOARD_PASSWORD,
+):
+    from app.db.session import transaction
+    from app.services import dashboard_auth_service
+
+    with session_factory() as db, transaction(db):
+        user = dashboard_auth_service.create_user(
+            db,
+            organization_id,
+            email=email,
+            display_name="Ops Lead",
+            password=password,
+            scopes=scopes if scopes is not None else DASHBOARD_SCOPES,
+        )
+        return user.id, user.api_key_id
+
+
+def dashboard_login(
+    client: TestClient, email: str = "ops@example.com", password: str = DASHBOARD_PASSWORD
+) -> str:
+    """Sign in (the client keeps the cookie); returns the CSRF token."""
+    response = client.post(f"{API}/auth/login", json={"email": email, "password": password})
+    assert response.status_code == 200, response.text
+    return response.json()["csrf_token"]

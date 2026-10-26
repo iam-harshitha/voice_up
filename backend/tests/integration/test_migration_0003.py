@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
 from tests.conftest import alembic_config
@@ -120,7 +121,16 @@ def test_downgrade_refuses_when_chunk3_data_exists(test_settings, engine):
         )
     with pytest.raises(Exception, match="refusing to downgrade 0003"):
         command.downgrade(config, "0002")
-    with engine.connect() as connection:  # still at head, data intact
+    # Still at head (the whole downgrade rolled back, including any later revisions it
+    # had already stepped through), and the data is intact.
+    head = ScriptDirectory.from_config(config).get_current_head()
+    with engine.connect() as connection:
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == (
-            "0003"
+            head
+        )
+        assert (
+            connection.execute(
+                text("SELECT status FROM approval_requests WHERE id = :r"), {"r": ids["request"]}
+            ).scalar()
+            == "expired"
         )

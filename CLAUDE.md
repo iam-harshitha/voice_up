@@ -14,7 +14,9 @@ from approvers' votes, and the agent reads back `pending` / `approved` / `reject
   (`backend/docs/voice-bolna.md`). No live Bolna call has been tested yet.
 - **Chunk 3 (done):** quorum/veto, conditional approvals, deadlines, escalation to
   backups, policy audit events, audit timeline API (`backend/docs/policies.md`).
-- **Later:** a React dashboard with a decision timeline and call evidence, and MCP.
+- **Chunk 4 (done, mock-verified):** React dashboard (`frontend/`) with cookie sessions +
+  CSRF, MCP server and demo agent (`backend/approval_line_agents/`)
+  (`backend/docs/dashboard-mcp.md`).
 
 Don't build later-chunk features while working on an earlier one.
 
@@ -38,6 +40,10 @@ pytest tests/integration/test_votes.py::TestConcurrency::test_concurrent_duplica
 pytest -m "not integration"     # no database needed
 python -m app.workers.voice_worker --once     # voice jobs + deadline/escalation jobs
 python -m app.cli voice-simulate --call-id <id> --decision approve   # mock + dev only
+python -m app.cli create-dashboard-user --org-id <id> --email x@example.com --name X --scopes "..."
+python -m approval_line_agents.mcp_server    # needs APPROVAL_LINE_API_URL / _API_KEY
+python -m approval_line_agents.demo --policy-id <id>
+# frontend (from frontend/): npm ci; npm run dev | typecheck | test | build | check:bundle
 ruff check . ; ruff format .
 ```
 
@@ -130,3 +136,17 @@ Voice subsystem invariants (see `backend/docs/voice-bolna.md`):
 - When a model changes, update or add a migration, then run `alembic check` and the
   full suite. `alembic check` does NOT see changed CHECK constraints or triggers; write
   those by hand (see migration 0003's `_replace_check`) and cover them with tests.
+
+Chunk 4 invariants (see `backend/docs/dashboard-mcp.md`):
+
+- The browser never holds an API key. Dashboard users sign in (scrypt hashes) and get an
+  HttpOnly `al_session` cookie; non-GET cookie requests need `X-CSRF-Token`. Each user is
+  backed by an internal API key (plaintext discarded) so scopes and attribution reuse the
+  existing chain. `X-API-Key` always takes precedence over a cookie.
+- Dashboard users can never hold `votes:write`; the UI has no voting control.
+- The dashboard, MCP server and demo agent never compute decisions. Show/act on
+  authorization only when `status == "approved"` and `evaluation.authorized is true`.
+- `approval_line_agents` talks to the API over HTTP only (never the DB). Its client parses
+  strictly and raises on missing/contradictory authorization fields; tool errors are never
+  successes. Request creation is never retried (no idempotency key yet).
+- MCP stdio: stdout is protocol only; log to stderr; never put the key in results/errors.

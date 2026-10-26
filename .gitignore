@@ -25,3 +25,12 @@ Thumbs.db
 
 # Local mock voice state (development only)
 .mock_voice/
+
+# Demo agent execution records (simulated deployments)
+.demo_runs/
+
+# Dashboard (frontend) build output and dependencies
+node_modules/
+frontend/dist/
+frontend/coverage/
+*.tsbuildinfo
