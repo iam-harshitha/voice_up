@@ -41,12 +41,11 @@ export const api = {
       query: { ...params, include_evaluation: true },
     }),
   getRequest: (id: string, o: Signal = {}) => apiRequest<RequestDetail>("GET", `/requests/${id}`, o),
-  createRequest: (body: {
-    policy_id: string;
-    action: string;
-    summary: string;
-    context: Record<string, unknown>;
-  }) => apiRequest<RequestDetail>("POST", "/requests", { body }),
+  /** The same key + payload returns the original request (no duplicate) on retry. */
+  createRequest: (
+    body: { policy_id: string; action: string; summary: string; context: Record<string, unknown> },
+    idempotencyKey: string,
+  ) => apiRequest<RequestDetail>("POST", "/requests", { body, headers: { "Idempotency-Key": idempotencyKey } }),
 
   // --- workflow ----------------------------------------------------------------------
   listConditions: (id: string, o: Signal = {}) =>

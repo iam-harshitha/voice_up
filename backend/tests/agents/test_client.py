@@ -171,3 +171,66 @@ def test_settings_from_env_validate(monkeypatch):
     with pytest.raises(ValueError, match="API_KEY") as excinfo:
         ClientSettings.from_env()
     assert SECRET not in str(excinfo.value)
+
+
+# --- Idempotent creation (Chunk 5) ----------------------------------------------------------
+
+
+async def _create(handler, **kwargs):
+    async with client_for(handler) as client:
+        return await client.create_request(uuid.uuid4(), "deploy", "s", {}, **kwargs)
+
+
+def test_ambiguous_create_failures_are_retried_with_the_same_key():
+    rid = uuid.uuid4()
+    seen: list[str | None] = []
+
+    def handler(request):
+        seen.append(request.headers.get("Idempotency-Key"))
+        if len(seen) == 1:
+            raise httpx.ReadTimeout("lost response", request=request)
+        if len(seen) == 2:
+            return httpx.Response(503, json={})
+        return httpx.Response(200, json=request_payload("pending", rid))  # server replay
+
+    status = run(_create(handler, idempotency_key="key-12345678"))
+    assert status.request_id == rid and status.authorized is False
+    assert seen == ["key-12345678"] * 3
+
+
+def test_without_a_key_creation_is_never_retried():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        raise httpx.ReadTimeout("lost response", request=request)
+
+    with pytest.raises(BackendUnavailableError):
+        run(_create(handler))
+    assert len(calls) == 1 and "Idempotency-Key" not in calls[0].headers
+
+
+def test_refusals_are_not_retried_even_with_a_key():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            422, json={"error": {"code": "idempotency_key_reused", "message": "x"}}
+        )
+
+    with pytest.raises(ApiResponseError) as excinfo:
+        run(_create(handler, idempotency_key="key-12345678"))
+    assert excinfo.value.code == "idempotency_key_reused" and len(calls) == 1
+
+
+def test_retries_are_bounded():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(502, text="bad gateway")
+
+    with pytest.raises(BackendUnavailableError):
+        run(_create(handler, idempotency_key="key-12345678", retries=2))
+    assert len(calls) == 3

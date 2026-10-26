@@ -37,7 +37,7 @@ Most operations already existed. Chunk 4 adds the smallest set of new endpoints 
 - **No dashboard voting UI.** Dashboard users can never hold `votes:write`.
 - **No generic HTTP tool in MCP.**
 - **No request search.** The API filters by status only, and the UI says so.
-- **No idempotency key for request creation.** See §6.
+- **No idempotency key for request creation** in Chunk 4. Chunk 5 added it (see §5 and `security.md`).
 
 **Migration 0004** adds `dashboard_users` and `dashboard_sessions`. Nothing else in the schema changed.
 
@@ -142,7 +142,7 @@ MCP client configuration (placeholders; keep the real key in the client's secret
 
 | Tool | Input (validated) | Result (structured) | Scope |
 |---|---|---|---|
-| `request_approval` | `policy_id` (UUID), `action` (1–200), `summary` (1–2000), `context` (object, optional) | `ApprovalStatusResult` (initial state; normally `pending`) | `requests:create` (+ `requests:read`) |
+| `request_approval` | `policy_id` (UUID), `action` (1–200), `summary` (1–2000), `context` (object, optional), `idempotency_key` (8–128 chars, optional; the server generates one per call otherwise) | `ApprovalStatusResult` (initial state; normally `pending`) | `requests:create` (+ `requests:read`) |
 | `get_approval_status` | `request_id` (UUID) | `ApprovalStatusResult` | `requests:read` |
 | `list_approval_requests` | `status?` (pending/approved/rejected/expired), `limit` 1–50, `offset` 0–10000 | `{items, total, limit, offset}` | `requests:read` |
 | `get_approval_timeline` | `request_id`, `after` ≥ 0, `limit` 1–200 | `{request_id, items, next_after}` | `audit:read` |
@@ -172,7 +172,7 @@ There are no tools to vote, resolve conditions, change status or make arbitrary 
 It reads `APPROVAL_LINE_API_URL` and `APPROVAL_LINE_API_KEY` (an agent key). With `--transport mcp`, the default, it launches the MCP server over stdio and calls its tools.
 
 1. It proposes `deploy_to_production` ("Deploy release v2.4 to production. Automated tests passed, but the release includes a database migration. Verify the backup and migration safety before proceeding.") with context: release, tests passed, migration included, backup **not** verified, simulated target.
-2. It creates **one** request. Creation is never retried, because the API has no idempotency key.
+2. It creates **one** request with an `Idempotency-Key` (printed). An ambiguous failure (timeout, 5xx) is retried with the same key and returns the same request. A re-run with `--idempotency-key <key>` recovers it. Without a key, nothing is ever retried.
 3. It polls with backoff (2 s, growing ×1.5, capped at 15 s) up to `--timeout`. It stops immediately on `rejected` or `expired`, and after 3 consecutive "backend unavailable" errors.
 4. **Execution gate.** The deployment runs only if all of these hold:
    - the request ID matches the created request;
@@ -181,11 +181,13 @@ It reads `APPROVAL_LINE_API_URL` and `APPROVAL_LINE_API_KEY` (an agent key). Wit
    - `authorized is True` (a strict boolean);
    - `state == "approved"` and `reason == "quorum_met"`;
    - `next_action == "none"`;
-   - the deadline has not passed;
-   - `decided_at` is set.
+   - `decided_at` is set;
+   - if the request has a deadline, the approval was decided **before** it (`decided_at < expires_at`).
+
+   The deadline limits when decisions can be *made*. An approval the agent observes after the deadline (a slow poll, `--resume`, a restart) still counts, because the backend refuses votes at or after `expires_at`. `evaluation.deadline_passed` describes only the current clock, so the gate doesn't use it. Pending, condition-blocked and re-approval-blocked requests past their deadline stop with exit 11 (tested).
 
    The gate is a second check, not a policy engine.
-5. **Simulated deployment:** writes `.demo_runs/deploy-<request id>.json` (`"simulated": true`, release, the authorizing request ID, policy version, timestamps). Nothing else is touched. The file is created exclusively, so one request can authorize at most one execution.
+5. **Simulated deployment:** writes `.demo_runs/deploy-<request id>.json` (`"simulated": true`, release, the authorizing request ID, policy version, timestamps). Nothing else is touched. The file is created exclusively, so one request can authorize at most one execution **per record directory** (`--record-dir`, default `.demo_runs` under the working directory). This is not a guarantee across different directories or machines (see `security.md`).
 
 | Exit code | Meaning |
 |---|---|
@@ -245,7 +247,7 @@ The same flow is automated, mock-backed, in `tests/integration/test_chunk4_e2e.p
 ## 7. Known limitations
 
 - **Live Bolna** calls, callbacks and condition free text are unverified.
-- **No request idempotency:** creation has no idempotency key, so a client that retries after an ambiguous failure can create a duplicate. The demo agent and dashboard never auto-retry, and they warn when the outcome is unknown. The smallest fix is an `Idempotency-Key` header with a unique (organization, key) column.
+- **Request idempotency (fixed in Chunk 5):** `POST /requests` accepts `Idempotency-Key`. A request created *without* a key still can't be retried safely; every client in this repository sends one.
 - **Account lockout only:** dashboard sign-in has account lockout but no per-IP rate limit, and no MFA or SSO.
 - **Fixed session lifetime:** absolute, with no idle timeout and no user-facing session list.
 - **Same-origin deployment required:** the dashboard must be served on the same origin as the API.

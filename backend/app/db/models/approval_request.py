@@ -43,6 +43,18 @@ class ApprovalRequest(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         ),
         Index("ix_approval_requests_organization_id_created_at", "organization_id", "created_at"),
         Index("ix_approval_requests_status_expires_at", "status", "expires_at"),
+        # Idempotent creation: one request per (organization, client key).
+        CheckConstraint(
+            "(idempotency_key_hash IS NULL) = (idempotency_fingerprint IS NULL)",
+            name="idempotency_fields_together",
+        ),
+        Index(
+            "uq_approval_requests_organization_id_idempotency_key_hash",
+            "organization_id",
+            "idempotency_key_hash",
+            unique=True,
+            postgresql_where=text("idempotency_key_hash IS NOT NULL"),
+        ),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -63,6 +75,10 @@ class ApprovalRequest(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     decided_at: Mapped[datetime | None]
     # Snapshotted deadline (created_at + policy deadline). Never caller-supplied.
     expires_at: Mapped[datetime | None]
+    # Idempotency-Key support: SHA-256 of the client's key (the key itself is not stored)
+    # and of the canonical request payload, to detect a key reused for different content.
+    idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))
+    idempotency_fingerprint: Mapped[str | None] = mapped_column(String(64))
 
     votes: Mapped[list["ApprovalVote"]] = relationship(  # noqa: F821
         order_by="[ApprovalVote.created_at, ApprovalVote.id]", viewonly=True

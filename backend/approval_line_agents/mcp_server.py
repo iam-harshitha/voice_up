@@ -20,7 +20,7 @@ import os
 import sys
 from datetime import datetime
 from typing import Annotated, Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -57,6 +57,19 @@ SummaryText = Annotated[
     Field(min_length=1, max_length=2000, description="What will happen and why, for approvers."),
 ]
 StatusFilter = Literal["pending", "approved", "rejected", "expired"]
+IdempotencyKeyArg = Annotated[
+    str | None,
+    Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:\-]+$",
+        description=(
+            "Optional, recommended. A key you choose for this intended action (e.g. a UUID). "
+            "If a call fails or times out, call again with the SAME key: you get the original "
+            "request back instead of a duplicate."
+        ),
+    ),
+]
 
 
 class ApprovalStatusResult(BaseModel):
@@ -228,8 +241,8 @@ def build_server(client: ApprovalLineClient) -> MCPServer:
         description=(
             "Ask humans to authorize a consequential action. Creates a durable approval "
             "request under the given policy and returns its initial, authoritative state "
-            "(normally pending). Creating a request never authorizes anything. Do not call "
-            "again to retry: check get_approval_status with the returned request_id instead."
+            "(normally pending). Creating a request never authorizes anything. To retry after "
+            "an error, call again with the same idempotency_key; never retry without one."
         )
     )
     async def request_approval(
@@ -240,9 +253,14 @@ def build_server(client: ApprovalLineClient) -> MCPServer:
             dict[str, Any] | None,
             Field(description="Structured facts for approvers (JSON object, at most 16 KB)."),
         ] = None,
+        idempotency_key: IdempotencyKeyArg = None,
     ) -> ApprovalStatusResult:
+        # Without a caller key, a per-call key still makes this server's own retries of an
+        # ambiguous failure safe (the API replays instead of creating a duplicate).
+        key = idempotency_key or f"mcp-{uuid4().hex}"
         status = await run(
-            "request_approval", client.create_request(policy_id, action, summary, context)
+            "request_approval",
+            client.create_request(policy_id, action, summary, context, idempotency_key=key),
         )
         return status_result(status)
 

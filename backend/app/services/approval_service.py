@@ -7,6 +7,8 @@ pure engine in app/domain/approval_rules.py, applies only a legal transition and
 the audit events alongside. Nothing here talks to the network.
 """
 
+import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,7 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.errors import BusinessRuleError, ConflictError, NotFoundError
+from app.core.errors import BusinessRuleError, ConflictError, NotFoundError, UnprocessableError
 from app.db.base import utcnow
 from app.db.models import (
     ApprovalCondition,
@@ -46,6 +48,7 @@ from app.services import audit_service
 from app.services.audit_service import AuditEventType
 from app.services.policy_service import get_policy
 
+IDEMPOTENCY_UNIQUE_INDEX = "uq_approval_requests_organization_id_idempotency_key_hash"
 VOTE_UNIQUE_CONSTRAINT = "uq_approval_votes_request_id_approver_id"
 SEAT_UNIQUE_CONSTRAINT = "uq_approval_votes_request_id_seat_approver_id"
 # Request jobs are retried a few times on unexpected errors; they are idempotent.
@@ -81,8 +84,93 @@ def request_rules(request: ApprovalRequest) -> RequestRules:
 # --- Creation ------------------------------------------------------------------------
 
 
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def request_fingerprint(data: ApprovalRequestCreate) -> str:
+    """Canonical hash of what the client asked for (used to detect a reused key)."""
+    canonical = json.dumps(
+        {
+            "policy_id": str(data.policy_id),
+            "action": data.action,
+            "summary": data.summary,
+            "context": data.context,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return _sha256(canonical)
+
+
+def _find_by_idempotency_key(
+    session: Session, organization_id: UUID, key_hash: str
+) -> tuple[UUID, str] | None:
+    """(request id, payload fingerprint) for a key, as plain values."""
+    row = session.execute(
+        select(ApprovalRequest.id, ApprovalRequest.idempotency_fingerprint).where(
+            ApprovalRequest.organization_id == organization_id,
+            ApprovalRequest.idempotency_key_hash == key_hash,
+        )
+    ).first()
+    session.rollback()  # end the read; the caller decides what to do next
+    return (row[0], row[1]) if row else None
+
+
+def _replay(existing: tuple[UUID, str], fingerprint: str) -> UUID:
+    request_id, stored = existing
+    if stored != fingerprint:
+        raise UnprocessableError(
+            "This Idempotency-Key was already used for a different request.",
+            code="idempotency_key_reused",
+        )
+    return request_id
+
+
+def submit_request(
+    session: Session,
+    organization_id: UUID,
+    data: ApprovalRequestCreate,
+    *,
+    idempotency_key: str | None = None,
+) -> tuple[ApprovalRequest, bool]:
+    """Create a request, or replay the one created earlier with the same key.
+
+    Returns (request, created). With a key, any number of retries (sequential or
+    concurrent) with the same payload yield one request; the same key with a different
+    payload is refused with 422. Keys are scoped to the organization and stored only as
+    a SHA-256 hash. Without a key, every call creates a new request (unchanged).
+    """
+    if idempotency_key is None:
+        return create_request(session, organization_id, data), True
+    key_hash = _sha256(idempotency_key)
+    fingerprint = request_fingerprint(data)
+    existing = _find_by_idempotency_key(session, organization_id, key_hash)
+    if existing is not None:
+        return get_request(session, organization_id, _replay(existing, fingerprint)), False
+    try:
+        request = create_request(
+            session, organization_id, data, idempotency=(key_hash, fingerprint)
+        )
+    except IntegrityError as exc:
+        # A concurrent call with the same key won the race. Its transaction committed;
+        # ours rolled back entirely (request, snapshot rows, jobs and audit event).
+        if not _is_unique_violation(exc, IDEMPOTENCY_UNIQUE_INDEX):
+            raise
+        existing = _find_by_idempotency_key(session, organization_id, key_hash)
+        if existing is None:  # pragma: no cover - the winner committed before we failed
+            raise
+        return get_request(session, organization_id, _replay(existing, fingerprint)), False
+    return request, True
+
+
 def create_request(
-    session: Session, organization_id: UUID, data: ApprovalRequestCreate
+    session: Session,
+    organization_id: UUID,
+    data: ApprovalRequestCreate,
+    *,
+    idempotency: tuple[str, str] | None = None,
 ) -> ApprovalRequest:
     now = utcnow()
     with transaction(session):
@@ -129,6 +217,8 @@ def create_request(
             created_at=now,
             updated_at=now,
             expires_at=expires_at,
+            idempotency_key_hash=idempotency[0] if idempotency else None,
+            idempotency_fingerprint=idempotency[1] if idempotency else None,
         )
         session.add(request)
         session.flush()

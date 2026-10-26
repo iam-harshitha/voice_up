@@ -12,6 +12,7 @@ Examples:
     python -m app.cli create-dashboard-user --org-id <uuid> --email ops@example.com \\
         --name "Ops Lead" --scopes "requests:read,requests:create,policies:read,..."
     python -m app.cli disable-dashboard-user --email ops@example.com
+    python -m app.cli demo-seed --org-id <uuid> --yes [--issue-agent-key]
 """
 
 import argparse
@@ -103,6 +104,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     disable.add_argument("--email", required=True)
 
+    demo = commands.add_parser(
+        "demo-seed",
+        help="DEMO ONLY: add the demo approvers and policies to an existing organization.",
+        description=(
+            "Idempotent and additive: creates fictional approvers (555-01xx numbers) and two "
+            "demo policies in the given organization, reusing identical ones and refusing to "
+            "touch conflicting ones. Never creates requests or votes, never deletes anything. "
+            "Refused when APP_ENV=production. Requires --yes."
+        ),
+    )
+    demo.add_argument("--org-id", required=True, type=UUID)
+    demo.add_argument("--yes", action="store_true", help="Confirm the additive changes.")
+    demo.add_argument(
+        "--issue-agent-key",
+        action="store_true",
+        help="Also issue a 'demo-agent' key (requests:create,requests:read,audit:read,"
+        "policies:read), printed once. Skipped if an active one already exists.",
+    )
+
     simulate = commands.add_parser(
         "voice-simulate",
         help="DEVELOPMENT ONLY: finish a mock call and deliver its webhook to a running API.",
@@ -177,6 +197,51 @@ def _voice_simulate(args: argparse.Namespace, settings) -> None:
         raise CliError("the API did not accept the simulated webhook")
 
 
+DEMO_AGENT_KEY = "demo-agent"
+DEMO_AGENT_SCOPES = "requests:create,requests:read,audit:read,policies:read"
+
+
+def _demo_seed(args: argparse.Namespace, settings, session) -> None:
+    from app.services import demo_seed_service
+
+    if settings.app_env == "production":
+        raise CliError("demo-seed is refused when APP_ENV=production")
+    if not args.yes:
+        raise CliError(
+            "demo-seed adds demo approvers and policies to organization "
+            f"{args.org_id}. Re-run with --yes to confirm."
+        )
+    try:
+        result = demo_seed_service.seed(session, args.org_id)
+    except demo_seed_service.DemoSeedError as exc:
+        raise CliError(str(exc)) from exc
+    print(f"Demo data in organization '{result.organization_name}' ({args.org_id}):")
+    for line in result.created:
+        print(f"  created  {line}")
+    for line in result.reused:
+        print(f"  reused   {line}")
+    for name, policy_id in result.policies.items():
+        print(f"  policy id  {policy_id}  {name}")
+    if args.issue_agent_key:
+        active = [
+            k
+            for k in api_key_service.list_api_keys(session, args.org_id)
+            if k.name == DEMO_AGENT_KEY and k.revoked_at is None
+        ]
+        session.rollback()
+        if active:
+            print(
+                f"  agent key '{DEMO_AGENT_KEY}' already active (id {active[0].id}); not reissued"
+            )
+        else:
+            with transaction(session):
+                key = api_key_service.issue_api_key(
+                    session, args.org_id, DEMO_AGENT_KEY, DEMO_AGENT_SCOPES
+                )
+            _print_issued(key)
+            _print_warning()
+
+
 def _read_password(args: argparse.Namespace) -> str:
     if args.password_env:
         value = os.environ.get(args.password_env)
@@ -245,6 +310,8 @@ def _run(args: argparse.Namespace) -> None:
             with transaction(session):
                 user = dashboard_auth_service.disable_user(session, args.email)
             print(f"Dashboard user '{user.email}' disabled; sessions and backing key revoked")
+        elif args.command == "demo-seed":
+            _demo_seed(args, settings, session)
         elif args.command == "revoke-key":
             with transaction(session):
                 key = api_key_service.revoke_api_key(session, args.key_id)

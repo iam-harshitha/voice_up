@@ -46,8 +46,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_origins=settings.cors_origins,
             allow_credentials=False,
             allow_methods=["GET", "POST", "PATCH"],
-            allow_headers=["Content-Type", "X-API-Key", "X-CSRF-Token", REQUEST_ID_HEADER],
-            expose_headers=[REQUEST_ID_HEADER],
+            allow_headers=[
+                "Content-Type",
+                "X-API-Key",
+                "X-CSRF-Token",
+                "Idempotency-Key",
+                REQUEST_ID_HEADER,
+            ],
+            expose_headers=[REQUEST_ID_HEADER, "Idempotent-Replayed"],
         )
     # Added last so it is the outermost user middleware and sees every response.
     app.add_middleware(RequestContextMiddleware)

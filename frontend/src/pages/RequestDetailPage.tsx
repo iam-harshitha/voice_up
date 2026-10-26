@@ -224,6 +224,16 @@ export function RequestDetailPage() {
   );
 }
 
+/**
+ * The deadline limits when decisions can be made. Once a request is approved or rejected
+ * it is final, so a later clock does not make it "passed"; only undecided or expired
+ * requests are affected by the deadline.
+ */
+export function deadlineNote(request: Pick<RequestDetail, "status" | "evaluation">): string {
+  if (request.status === "approved" || request.status === "rejected") return " — decided before the deadline";
+  return request.evaluation?.deadline_passed ? " — passed" : "";
+}
+
 function EvaluationCard({ request, nameOf }: { request: RequestDetail; nameOf: (id: string) => string }) {
   const e = request.evaluation;
   if (!e) return <Card title="Policy evaluation"><p className="text-sm text-slate-500">No evaluation returned.</p></Card>;
@@ -237,7 +247,7 @@ function EvaluationCard({ request, nameOf }: { request: RequestDetail; nameOf: (
     [
       "Deadline",
       request.expires_at
-        ? `${formatDateTime(request.expires_at)} (${formatRelative(request.expires_at)})${e.deadline_passed ? " — passed" : ""}`
+        ? `${formatDateTime(request.expires_at)} (${formatRelative(request.expires_at)})${deadlineNote(request)}`
         : "None",
     ],
   ];

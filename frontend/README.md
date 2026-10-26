@@ -30,6 +30,7 @@ To point the dev proxy at another backend, set `APPROVAL_LINE_BACKEND_URL` (a se
 - **No API keys in the browser.** Authentication is a server-side session in an HttpOnly cookie. JavaScript never sees the session token, and nothing is written to `localStorage` or `sessionStorage`.
 - **CSRF.** Every POST and PATCH sends the CSRF token returned at sign-in, held in memory only.
 - **Scope-aware UI.** Controls the account's scopes do not allow are hidden or marked unavailable. The backend enforces scopes regardless.
+- **Safe retries.** New requests are sent with an `Idempotency-Key` that stays the same while the form is unchanged, so resubmitting after a timeout returns the original request instead of a duplicate.
 - **No voting.** The dashboard cannot vote. Votes come from verified voice calls or a trusted integration key.
 - **Contact details are masked.** Approver phone numbers and emails appear only on the Approvers page, masked until revealed.
 - **No `VITE_*` secrets.** There are no `VITE_*` variables at all.

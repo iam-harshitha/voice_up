@@ -11,6 +11,7 @@ UNREACHABLE_DB = "postgresql+psycopg://nobody:secret-password@127.0.0.1:1/approv
 @pytest.fixture
 def offline_client():
     settings = Settings(
+        _env_file=None,
         database_url=UNREACHABLE_DB,
         app_env="test",
         log_level="WARNING",

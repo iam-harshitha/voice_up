@@ -332,3 +332,53 @@ def test_stdio_server_refuses_to_start_without_configuration(tmp_path):
     assert completed.returncode == 2
     assert completed.stdout == ""  # nothing pollutes the protocol stream
     assert "APPROVAL_LINE_API_URL" in completed.stderr
+
+
+def test_request_approval_always_sends_an_idempotency_key():
+    rid = uuid.uuid4()
+    keys = []
+
+    def handler(request):
+        keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(201, json=request_payload("pending", rid))
+
+    base = {"policy_id": str(POLICY_ID), "action": "deploy_to_production", "summary": "s"}
+    call(handler, "request_approval", {**base, "idempotency_key": "agent-chosen-key-1"})
+    call(handler, "request_approval", base)
+    assert keys[0] == "agent-chosen-key-1"
+    assert keys[1].startswith("mcp-") and len(keys[1]) > 8
+
+
+def test_request_approval_retries_an_ambiguous_failure_without_duplicating():
+    rid = uuid.uuid4()
+    keys = []
+
+    def handler(request):
+        keys.append(request.headers.get("Idempotency-Key"))
+        if len(keys) == 1:
+            raise httpx.ReadTimeout("response lost", request=request)
+        return httpx.Response(200, json=request_payload("pending", rid))
+
+    result = call(
+        handler,
+        "request_approval",
+        {
+            "policy_id": str(POLICY_ID),
+            "action": "deploy_to_production",
+            "summary": "s",
+            "idempotency_key": "agent-chosen-key-2",
+        },
+    )
+    assert not result.is_error and result.structured_content["request_id"] == str(rid)
+    assert keys == ["agent-chosen-key-2", "agent-chosen-key-2"]
+
+
+@pytest.mark.parametrize("key", ["short", "bad key with spaces", "x" * 129])
+def test_malformed_idempotency_keys_never_reach_the_backend(key):
+    calls = []
+    result = call(
+        lambda r: calls.append(r) or httpx.Response(500),
+        "request_approval",
+        {"policy_id": str(POLICY_ID), "action": "a", "summary": "s", "idempotency_key": key},
+    )
+    assert result.is_error and calls == []

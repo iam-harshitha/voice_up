@@ -310,7 +310,11 @@ def test_unresolved_condition_never_executes(world):
         async with world["api_client"]() as api:
             gateway = RestGateway(api)
             created = await gateway.create(
-                uuid.UUID(world["policy"]["id"]), ACTION, SUMMARY.format(release=RELEASE), {}
+                uuid.UUID(world["policy"]["id"]),
+                ACTION,
+                SUMMARY.format(release=RELEASE),
+                {},
+                "e2e-condition-key",
             )
             await asyncio.to_thread(start_calls, world, str(created.request_id))
             time = FakeTime(

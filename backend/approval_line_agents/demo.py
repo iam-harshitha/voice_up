@@ -34,9 +34,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from approval_line_agents.client import (
+    IDEMPOTENCY_KEY_PATTERN,
     ApiResponseError,
     ApprovalLineClient,
     ApprovalLineError,
@@ -70,7 +71,12 @@ EXIT_GATE_REFUSED = 15
 
 class ApprovalGateway(Protocol):
     async def create(
-        self, policy_id: UUID, action: str, summary: str, context: dict[str, Any]
+        self,
+        policy_id: UUID,
+        action: str,
+        summary: str,
+        context: dict[str, Any],
+        idempotency_key: str,
     ) -> ApprovalStatus: ...
 
     async def status(self, request_id: UUID) -> ApprovalStatus: ...
@@ -81,9 +87,16 @@ class RestGateway:
         self._client = client
 
     async def create(
-        self, policy_id: UUID, action: str, summary: str, context: dict[str, Any]
+        self,
+        policy_id: UUID,
+        action: str,
+        summary: str,
+        context: dict[str, Any],
+        idempotency_key: str,
     ) -> ApprovalStatus:
-        return await self._client.create_request(policy_id, action, summary, context)
+        return await self._client.create_request(
+            policy_id, action, summary, context, idempotency_key=idempotency_key
+        )
 
     async def status(self, request_id: UUID) -> ApprovalStatus:
         return await self._client.get_status(request_id)
@@ -141,11 +154,22 @@ class McpGateway:
         return status_from_tool_result(result.structured_content)
 
     async def create(
-        self, policy_id: UUID, action: str, summary: str, context: dict[str, Any]
+        self,
+        policy_id: UUID,
+        action: str,
+        summary: str,
+        context: dict[str, Any],
+        idempotency_key: str,
     ) -> ApprovalStatus:
         return await self._call(
             "request_approval",
-            {"policy_id": str(policy_id), "action": action, "summary": summary, "context": context},
+            {
+                "policy_id": str(policy_id),
+                "action": action,
+                "summary": summary,
+                "context": context,
+                "idempotency_key": idempotency_key,
+            },
         )
 
     async def status(self, request_id: UUID) -> ApprovalStatus:
@@ -189,8 +213,17 @@ def execution_gate(
         (e.authorized is True, "backend did not report authorized=true"),
         (e.state == "approved" and e.reason == "quorum_met", "evaluation is not final approval"),
         (e.next_action == "none", "evaluation still requires an action"),
-        (not e.deadline_passed, "deadline has passed"),
         (status.decided_at is not None, "request has no decision time"),
+        # The deadline limits when a decision can be MADE, not when an approval may be
+        # used: the backend refuses votes at or after expires_at, so a genuine approval
+        # is always decided strictly before it. `evaluation.deadline_passed` only says
+        # the clock is now past expires_at, which is also true for an approval observed
+        # late (slow poll, --resume, agent restart), so it must not block execution.
+        (
+            status.expires_at is None
+            or (status.decided_at is not None and status.decided_at < status.expires_at),
+            "approval was not decided before the request's deadline",
+        ),
     )
     for ok, reason in checks:
         if not ok:
@@ -350,6 +383,7 @@ async def run_agent(
     report: Reporter = say,
     resume_request_id: UUID | None = None,
     clock: Clock | None = None,
+    idempotency_key: str | None = None,
 ) -> int:
     summary = SUMMARY.format(release=release)
     intended = IntendedAction(policy_id=policy_id, action=ACTION, summary=summary)
@@ -364,12 +398,18 @@ async def run_agent(
     report(f"  {summary}")
 
     if resume_request_id is None:
-        report("Requesting human authorization from Approval Line...")
+        # One key per intended action: retries (here, in the client, or a re-run of this
+        # command with --idempotency-key) return the same request instead of a duplicate.
+        key = idempotency_key or f"demo-{uuid4().hex}"
+        report(f"Requesting human authorization from Approval Line (idempotency key {key})...")
         try:
-            created = await gateway.create(policy_id, ACTION, summary, context)
+            created = await gateway.create(policy_id, ACTION, summary, context, key)
         except ApprovalLineError as exc:
-            # Not retried: without an idempotency key a retry could create a duplicate.
             report(f"Could not create the approval request ({exc.code}): {exc.message}")
+            report(
+                "Nothing was executed. If the request may have been created, re-run with "
+                f"--idempotency-key {key} to recover it instead of creating a duplicate."
+            )
             return EXIT_CREATE_FAILED
         request_id = created.request_id
         report(f"Approval request created: {request_id}")
@@ -431,6 +471,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         "executor": executor,
         "config": config,
         "resume_request_id": args.resume,
+        "idempotency_key": args.idempotency_key,
     }
     if args.transport == "rest":
         async with ApprovalLineClient(settings) as client:
@@ -450,6 +491,12 @@ def _positive(value: str) -> float:
     return number
 
 
+def _idempotency_key(value: str) -> str:
+    if not IDEMPOTENCY_KEY_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError("8-128 characters: letters, digits, . _ : -")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="approval-line-demo-agent",
@@ -464,6 +511,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--transport", choices=("mcp", "rest"), default="mcp")
     parser.add_argument(
         "--resume", type=UUID, metavar="REQUEST_ID", help="Watch an existing request instead."
+    )
+    parser.add_argument(
+        "--idempotency-key",
+        type=_idempotency_key,
+        help="Reuse the key printed by an earlier run to recover its request (no duplicate).",
     )
     parser.add_argument("--poll-interval", type=_positive, default=2.0)
     parser.add_argument("--max-interval", type=_positive, default=15.0)

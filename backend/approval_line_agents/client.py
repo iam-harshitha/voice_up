@@ -13,7 +13,9 @@ Design rules:
 
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -26,6 +28,8 @@ RequestStatus = Literal["pending", "approved", "rejected", "expired"]
 TERMINAL_STATUSES: frozenset[str] = frozenset({"approved", "rejected", "expired"})
 
 DEFAULT_TIMEOUT_SECONDS = 10.0
+# Same rule as the API's Idempotency-Key header.
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:\-]{8,128}$")
 MAX_ERROR_MESSAGE = 300
 
 
@@ -300,21 +304,39 @@ class ApprovalLineClient:
         return body
 
     async def create_request(
-        self, policy_id: UUID, action: str, summary: str, context: dict[str, Any] | None = None
+        self,
+        policy_id: UUID,
+        action: str,
+        summary: str,
+        context: dict[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+        retries: int = 2,
     ) -> ApprovalStatus:
-        """Create one request. Not retried automatically: the API has no idempotency key,
-        so a retry after an ambiguous failure could create a duplicate."""
-        body = await self._call(
-            "POST",
-            "/requests",
-            json={
-                "policy_id": str(policy_id),
-                "action": action,
-                "summary": summary,
-                "context": context or {},
-            },
-        )
-        return parse_status(body)
+        """Create one request.
+
+        With ``idempotency_key``, an ambiguous failure (timeout, network error, 5xx) is
+        retried up to ``retries`` times with the same key: the server replays the original
+        request instead of creating a duplicate. Without a key nothing is retried, because
+        a retry could create a second request.
+        """
+        payload = {
+            "policy_id": str(policy_id),
+            "action": action,
+            "summary": summary,
+            "context": context or {},
+        }
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        attempts = 1 + (max(0, retries) if idempotency_key else 0)
+        for attempt in range(attempts):
+            try:
+                body = await self._call("POST", "/requests", json=payload, headers=headers)
+                return parse_status(body)
+            except BackendUnavailableError:
+                if attempt + 1 >= attempts:
+                    raise
+                await asyncio.sleep(min(2.0, 0.25 * 2**attempt))
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def get_status(self, request_id: UUID) -> ApprovalStatus:
         status = parse_status(await self._call("GET", f"/requests/{request_id}"))

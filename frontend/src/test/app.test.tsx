@@ -433,11 +433,17 @@ describe("request creation", () => {
     expect(api.calls.some((c) => c.method === "POST")).toBe(false);
   });
 
-  it("warns that the outcome is unknown after a timeout instead of resubmitting", async () => {
+  it("after an ambiguous failure, resubmitting reuses the same idempotency key", async () => {
+    let attempt = 0;
     const api = mockApi({
-      "GET /auth/session": { status: 200, body: session() },
+      ...detailRoutes(requestDetail()),
       "GET /policies": { status: 200, body: { items: [policy], total: 1, limit: 100, offset: 0 } },
-      "POST /requests": { status: 502, body: { error: { code: "bad_gateway", message: "x" } } },
+      "POST /requests": () => {
+        attempt += 1;
+        return attempt === 1
+          ? { status: 502, body: { error: { code: "bad_gateway", message: "x" } } }
+          : { status: 200, body: requestDetail() }; // the server replays the original
+      },
     });
     renderApp("/requests/new");
     const user = userEvent.setup();
@@ -446,6 +452,31 @@ describe("request creation", () => {
     await user.click(screen.getByRole("button", { name: "Create request" }));
     expect(await screen.findByText(/outcome is unknown/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Create request" }));
-    expect(api.calls.filter((c) => c.method === "POST")).toHaveLength(1);
+    expect(await screen.findByRole("heading", { name: "deploy_to_production" })).toBeInTheDocument();
+    const posts = api.calls.filter((c) => c.method === "POST");
+    expect(posts).toHaveLength(2);
+    const first = posts[0]!.headers.get("Idempotency-Key");
+    expect(first).toMatch(/^dash-[0-9a-f-]{36}$/);
+    expect(posts[1]!.headers.get("Idempotency-Key")).toBe(first);
   });
+
+  it("uses a new idempotency key once the form content changes", async () => {
+    const api = mockApi({
+      ...detailRoutes(requestDetail()),
+      "GET /policies": { status: 200, body: { items: [policy], total: 1, limit: 100, offset: 0 } },
+      "POST /requests": { status: 502, body: { error: { code: "bad_gateway", message: "x" } } },
+    });
+    renderApp("/requests/new");
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByLabelText("Policy"), policy.id);
+    await user.click(screen.getByRole("button", { name: "Use the production-deployment example" }));
+    await user.click(screen.getByRole("button", { name: "Create request" }));
+    await screen.findByText(/outcome is unknown/);
+    await user.type(screen.getByLabelText("Action"), "_v2");
+    await user.click(screen.getByRole("button", { name: "Create request" }));
+    await waitFor(() => expect(api.calls.filter((c) => c.method === "POST")).toHaveLength(2));
+    const [a, b] = api.calls.filter((c) => c.method === "POST");
+    expect(a!.headers.get("Idempotency-Key")).not.toBe(b!.headers.get("Idempotency-Key"));
+  });
+
 });

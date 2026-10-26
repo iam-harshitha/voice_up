@@ -15,6 +15,7 @@ venv/
 # Secrets and local configuration
 .env
 *.env
+.env.*
 !.env.example
 
 # Editors / OS
@@ -28,6 +29,9 @@ Thumbs.db
 
 # Demo agent execution records (simulated deployments)
 .demo_runs/
+
+# Local demo process state and logs (scripts/start-demo.ps1)
+.demo/
 
 # Dashboard (frontend) build output and dependencies
 node_modules/

@@ -92,3 +92,15 @@ describe("no secrets in browser code", () => {
     }
   });
 });
+
+describe("deadline display", () => {
+  it("never shows a final decision's deadline as passed", async () => {
+    const { deadlineNote } = await import("../pages/RequestDetailPage");
+    const ev = (deadline_passed: boolean) => ({ deadline_passed }) as never;
+    expect(deadlineNote({ status: "approved", evaluation: ev(true) })).toContain("decided before");
+    expect(deadlineNote({ status: "rejected", evaluation: ev(true) })).toContain("decided before");
+    expect(deadlineNote({ status: "pending", evaluation: ev(true) })).toBe(" — passed");
+    expect(deadlineNote({ status: "expired", evaluation: ev(true) })).toBe(" — passed");
+    expect(deadlineNote({ status: "pending", evaluation: ev(false) })).toBe("");
+  });
+});

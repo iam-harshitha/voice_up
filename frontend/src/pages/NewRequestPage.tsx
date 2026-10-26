@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { api } from "../api/endpoints";
@@ -21,6 +21,10 @@ export const DEPLOY_EXAMPLE = {
     target: "simulated-production",
   },
 };
+
+function newKey(): string {
+  return `dash-${crypto.randomUUID()}`;
+}
 
 export function validateRequestForm(values: { policyId: string; action: string; summary: string; context: string }) {
   const errors: Record<string, string> = {};
@@ -64,9 +68,16 @@ export function NewRequestPage() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(false);
-  // Guards against double submission within this page. It is not distributed
-  // idempotency: the API has no idempotency key for request creation.
+  // Blocks a second click while a submission is in flight. Retries after a failure are
+  // made safe by the server-side Idempotency-Key below, not by this flag.
   const submitted = useRef(false);
+  // One key per form content: resubmitting unchanged content after an ambiguous failure
+  // returns the original request instead of creating a duplicate; editing the form
+  // starts a new intended request with a new key.
+  const idempotencyKey = useRef(newKey());
+  useEffect(() => {
+    idempotencyKey.current = newKey();
+  }, [policyId, action, summary, context]);
 
   if (!can("requests:create")) return <Unavailable scope="requests:create" what="Creating requests" />;
 
@@ -80,7 +91,7 @@ export function NewRequestPage() {
     setBusy(true);
     setSubmitError(null);
     try {
-      const created = await api.createRequest(payload);
+      const created = await api.createRequest(payload, idempotencyKey.current);
       toast("success", `Request ${created.id} created — status: ${created.status}.`);
       navigate(`/requests/${created.id}`);
     } catch (caught) {
@@ -88,10 +99,13 @@ export function NewRequestPage() {
       const error = caught instanceof ApiError ? caught : new ApiError(0, "client_error", String(caught));
       setSubmitError(error);
       if (error.status === 0 || error.status >= 500) {
-        setErrors({ form: "The outcome is unknown. Check the request list before submitting again." });
-      } else {
-        submitted.current = false;
+        setErrors({
+          form:
+            "The outcome is unknown. Submitting again without changes is safe: it reuses the same " +
+            "idempotency key and returns the original request if it was created.",
+        });
       }
+      submitted.current = false;
     } finally {
       setBusy(false);
     }

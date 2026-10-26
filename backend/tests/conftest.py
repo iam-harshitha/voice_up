@@ -69,7 +69,11 @@ def test_database_url() -> str:
 
 @pytest.fixture(scope="session")
 def test_settings(test_database_url: str) -> Settings:
-    return Settings(database_url=test_database_url, app_env="test", log_level="WARNING")
+    # _env_file=None: integration tests must not inherit local .env choices such as
+    # VOICE_PROVIDER=mock; voice tests opt in explicitly through voice_settings.
+    return Settings(
+        _env_file=None, database_url=test_database_url, app_env="test", log_level="WARNING"
+    )
 
 
 @pytest.fixture(scope="session")

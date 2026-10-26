@@ -161,6 +161,9 @@ class Settings(BaseSettings):
     def _check_dashboard_configuration(self) -> Self:
         if self.app_env == "production" and self.dashboard_cookie_secure is False:
             raise ValueError("DASHBOARD_COOKIE_SECURE=false is not allowed when APP_ENV=production")
+        insecure = [o for o in self.cors_origins if not o.startswith("https://")]
+        if self.app_env == "production" and insecure:
+            raise ValueError("CORS_ORIGINS must use https:// origins when APP_ENV=production")
         return self
 
     @field_validator("api_v1_prefix")

@@ -1,0 +1,76 @@
+# Approval Line CI: the same checks as the local verification workflow.
+# No secrets are needed: the database is a throwaway service container and voice uses the
+# in-process mock. Live Bolna tests do not exist in this pipeline and must never be added
+# to it (see backend/docs/voice-bolna.md for the manual live checklist).
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: approval_line
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+          POSTGRES_DB: approval_line
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U approval_line -d approval_line"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      # Throwaway CI databases only; nothing here is a real credential.
+      DATABASE_URL: postgresql+psycopg://approval_line:ci-only-not-a-secret@localhost:5432/approval_line
+      TEST_DATABASE_URL: postgresql+psycopg://approval_line:ci-only-not-a-secret@localhost:5432/approval_line_test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Create the test database
+        run: PGPASSWORD=ci-only-not-a-secret psql -h localhost -U approval_line -d approval_line -c "CREATE DATABASE approval_line_test"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format
+        run: ruff format --check .
+      - name: Migrations apply and match the models
+        run: |
+          alembic upgrade head
+          alembic current
+          alembic check
+      - name: Tests (unit, agents/MCP, integration, mock-backed end-to-end)
+        run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Bundle secret scan
+        run: npm run check:bundle

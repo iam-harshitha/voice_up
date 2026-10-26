@@ -13,6 +13,7 @@ action is authorized and what happens next.
 | Bolna voice calls to approvers ([docs](backend/docs/voice-bolna.md)) | Chunk 2 ✅ mock-verified; live calls not yet verified |
 | Quorum/veto, conditions, deadlines, escalation, audit timeline ([docs](backend/docs/policies.md)) | Chunk 3 ✅ |
 | [`frontend/`](frontend/README.md) dashboard, MCP server, demo agent ([docs](backend/docs/dashboard-mcp.md)) | Chunk 4 ✅ mock-verified |
+| Hardening, idempotency, demo tooling, CI, deployment guide ([runbook](backend/docs/demo-runbook.md), [deploy](backend/docs/deployment.md), [security](backend/docs/security.md)) | Chunk 5 ✅ mock-verified; not deployed |
 
 Start with [backend/README.md](backend/README.md) for setup, then
-[backend/docs/dashboard-mcp.md](backend/docs/dashboard-mcp.md) §6 for the end-to-end demo.
+[backend/docs/demo-runbook.md](backend/docs/demo-runbook.md) for the one-command local demo.

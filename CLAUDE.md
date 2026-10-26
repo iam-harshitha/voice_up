@@ -17,6 +17,10 @@ from approvers' votes, and the agent reads back `pending` / `approved` / `reject
 - **Chunk 4 (done, mock-verified):** React dashboard (`frontend/`) with cookie sessions +
   CSRF, MCP server and demo agent (`backend/approval_line_agents/`)
   (`backend/docs/dashboard-mcp.md`).
+- **Chunk 5 (done, mock-verified):** hardening and demo readiness: `Idempotency-Key` on
+  `POST /requests` (migration 0005), production fail-closed config, failure-injection
+  tests, `demo-seed`, `scripts/start-demo.ps1` / `stop-demo.ps1`, CI, deployment
+  artifacts (`backend/docs/deployment.md`, `security.md`, `demo-runbook.md`).
 
 Don't build later-chunk features while working on an earlier one.
 
@@ -43,6 +47,9 @@ python -m app.cli voice-simulate --call-id <id> --decision approve   # mock + de
 python -m app.cli create-dashboard-user --org-id <id> --email x@example.com --name X --scopes "..."
 python -m approval_line_agents.mcp_server    # needs APPROVAL_LINE_API_URL / _API_KEY
 python -m approval_line_agents.demo --policy-id <id>
+python -m app.cli demo-seed --org-id <id> --yes [--issue-agent-key]   # dev only, additive
+python scripts/measure_latency.py            # test DB only; never while pytest runs
+# repo root: .\scripts\start-demo.ps1 -Migrate ; .\scripts\stop-demo.ps1
 # frontend (from frontend/): npm ci; npm run dev | typecheck | test | build | check:bundle
 ruff check . ; ruff format .
 ```
@@ -148,5 +155,9 @@ Chunk 4 invariants (see `backend/docs/dashboard-mcp.md`):
   authorization only when `status == "approved"` and `evaluation.authorized is true`.
 - `approval_line_agents` talks to the API over HTTP only (never the DB). Its client parses
   strictly and raises on missing/contradictory authorization fields; tool errors are never
-  successes. Request creation is never retried (no idempotency key yet).
+  successes. Request creation is retried only with the same `Idempotency-Key`
+  (never without one); the server replays the original request.
+- Tests build `Settings(_env_file=None, ...)`: the developer's `.env` must never change
+  test behaviour. Never run two pytest processes (or the latency script) at once: they
+  share the test database.
 - MCP stdio: stdout is protocol only; log to stderr; never put the key in results/errors.

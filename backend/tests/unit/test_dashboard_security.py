@@ -66,3 +66,54 @@ def test_insecure_cookies_are_refused_in_production():
 
 def test_votes_write_is_forbidden_for_dashboard_users():
     assert "votes:write" in auth.FORBIDDEN_DASHBOARD_SCOPES
+
+
+# --- Production fails closed (Chunk 5) ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ({"voice_provider": "mock"}, "VOICE_PROVIDER=mock"),
+        ({"dashboard_cookie_secure": False}, "DASHBOARD_COOKIE_SECURE"),
+        ({"cors_origins": "*"}, "wildcard"),
+        ({"cors_origins": "http://dashboard.example.com"}, "https"),
+        ({"voice_provider": "bolna"}, "BOLNA_API_KEY"),
+        (
+            {
+                "voice_provider": "bolna",
+                "bolna_api_key": "k" * 20,
+                "bolna_agent_id": "agent",
+                "voice_webhook_token": "short",
+            },
+            "VOICE_WEBHOOK_TOKEN",
+        ),
+    ],
+)
+def test_unsafe_production_configuration_is_refused(values, message):
+    with pytest.raises(ValidationError, match=message):
+        settings(app_env="production", **values)
+
+
+def test_safe_production_configuration_is_accepted():
+    prod = settings(
+        app_env="production",
+        cors_origins="https://dashboard.example.com",
+        voice_provider="bolna",
+        bolna_api_key="k" * 20,
+        bolna_agent_id="agent",
+        voice_webhook_token="t" * 40,
+    )
+    assert prod.session_cookie_secure is True and prod.voice_provider == "bolna"
+    assert "t" * 40 not in repr(prod) and "k" * 20 not in repr(prod)
+
+
+def test_production_app_hides_docs_and_debug():
+    from app.main import create_app
+
+    app = create_app(settings(app_env="production"))
+    assert app.docs_url is None and app.openapi_url is None and app.debug is False
+
+
+def test_development_http_origins_remain_allowed():
+    assert settings(cors_origins="http://localhost:5173").cors_origins == ["http://localhost:5173"]

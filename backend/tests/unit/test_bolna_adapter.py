@@ -27,7 +27,8 @@ def settings(**overrides) -> Settings:
         "voice_webhook_token": TOKEN,
         **overrides,
     }
-    return Settings(**values)
+    # _env_file=None: the developer's local .env must not change what these tests see.
+    return Settings(_env_file=None, **values)
 
 
 def provider_with(handler, **overrides) -> tuple[BolnaProvider, list[httpx.Request]]:
@@ -254,7 +255,7 @@ class TestConfiguration:
 
     def test_mock_is_refused_in_production(self):
         with pytest.raises(ValidationError, match="not allowed"):
-            Settings(database_url=DB, app_env="production", voice_provider="mock")
+            Settings(_env_file=None, database_url=DB, app_env="production", voice_provider="mock")
 
     def test_short_webhook_token_is_refused(self):
         with pytest.raises(ValidationError, match="32 characters"):
@@ -269,4 +270,4 @@ class TestConfiguration:
         assert API_KEY not in rendered and TOKEN not in rendered
 
     def test_voice_is_disabled_by_default(self):
-        assert Settings(database_url=DB).voice_provider == "disabled"
+        assert Settings(_env_file=None, database_url=DB).voice_provider == "disabled"

@@ -61,13 +61,15 @@ class ScriptedGateway:
         self.create_calls = 0
         self.status_calls = 0
         self.create_error = create_error
+        self.keys: list[str] = []
 
     def payload(self, kind, **kw):
         kw.setdefault("summary", SUMMARY_TEXT)
         return request_payload(kind, kw.pop("request_id", self.request_id), **kw)
 
-    async def create(self, policy_id, action, summary, context):
+    async def create(self, policy_id, action, summary, context, idempotency_key):
         self.create_calls += 1
+        self.keys.append(idempotency_key)
         if self.create_error:
             raise self.create_error
         assert (policy_id, action, summary) == (POLICY_ID, ACTION, SUMMARY_TEXT)
@@ -236,11 +238,35 @@ def test_14_repeated_approved_polls_and_reruns_never_execute_twice(tmp_path):
     assert any("already authorized one execution" in line for line in lines)
 
 
-def test_15_creation_is_never_retried(tmp_path):
+def test_15_failed_creation_halts_with_a_recoverable_key(tmp_path):
+    """The agent asks to create once (the client's own retries reuse the same key); on
+    failure it halts, executes nothing and prints the key that recovers the request."""
     gw = ScriptedGateway([], create_error=BackendUnavailableError("backend_timeout", "slow"))
-    code, executor, _ = run(gw, tmp_path)
+    code, executor, lines = run(gw, tmp_path)
     assert code == EXIT_CREATE_FAILED and executor.calls == 0
     assert gw.create_calls == 1 and gw.status_calls == 0
+    key = gw.keys[0]
+    assert key.startswith("demo-") and any(f"--idempotency-key {key}" in line for line in lines)
+
+
+def test_15b_a_supplied_idempotency_key_is_used_for_creation(tmp_path):
+    gw = ScriptedGateway([])
+    gw.script = [gw.payload("approved")]
+    executor = CountingExecutor(tmp_path)
+    clock = FakeClock()
+    code = asyncio.run(
+        run_agent(
+            gw,
+            policy_id=POLICY_ID,
+            release=RELEASE,
+            executor=executor,
+            config=WaitConfig(poll_interval=1.0, timeout=10),
+            report=lambda _line: None,
+            clock=Clock(monotonic=clock.monotonic, sleep=clock.sleep),
+            idempotency_key="recover-me-123",
+        )
+    )
+    assert code == EXIT_EXECUTED and gw.keys == ["recover-me-123"]
 
 
 def test_16_satisfied_condition_alone_never_executes(tmp_path):
@@ -364,3 +390,109 @@ def test_mcp_gateway_refuses_a_different_request():
     )
     with pytest.raises(MalformedResponseError, match="different request"):
         asyncio.run(gateway.status(uuid.uuid4()))
+
+
+def test_concurrent_executions_for_one_request_run_at_most_once(tmp_path):
+    """The execution record is claimed with an exclusive create: when many workers race
+    for the same approved request on one filesystem, exactly one runs."""
+    import threading
+
+    status = parse_status(request_payload("approved", uuid.uuid4(), summary=SUMMARY_TEXT))
+    deployment = SimulatedDeployment(tmp_path / "runs")
+    barrier = threading.Barrier(8)
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def attempt():
+        barrier.wait()
+        try:
+            deployment(status, RELEASE)
+            result = "ran"
+        except FileExistsError:
+            result = "refused"
+        with lock:
+            outcomes.append(result)
+
+    threads = [threading.Thread(target=attempt) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert sorted(outcomes) == ["ran"] + ["refused"] * 7
+    assert len(list((tmp_path / "runs").iterdir())) == 1
+
+
+# --- F1: deadline semantics at the execution gate -----------------------------------------
+#
+# The backend refuses votes at or after expires_at, so a genuine approval is decided
+# strictly before its deadline. evaluation.deadline_passed only reports that the clock is
+# now past expires_at, which is also true for an approval observed late.
+
+DEADLINE = "2026-10-24T11:00:00Z"
+
+
+def with_deadline(payload, *, expires_at=DEADLINE, decided_at=None, deadline_passed=True):
+    payload["expires_at"] = expires_at
+    payload["evaluation"]["expires_at"] = expires_at
+    payload["evaluation"]["deadline_passed"] = deadline_passed
+    if decided_at is not None:
+        payload["decided_at"] = decided_at
+    return payload
+
+
+def test_approval_observed_after_the_deadline_still_executes(tmp_path):
+    """Approved at 10:05, deadline 11:00, agent polls after 11:00 (slow poll)."""
+    gw = ScriptedGateway([])
+    gw.script = [gw.payload("pending"), with_deadline(gw.payload("approved"))]
+    code, executor, lines = run(gw, tmp_path)
+    assert code == EXIT_EXECUTED and executor.calls == 1, lines
+
+
+def test_agent_restart_after_the_deadline_executes_a_prior_approval_once(tmp_path):
+    gw = ScriptedGateway([])
+    gw.script = [with_deadline(gw.payload("approved"))]
+    executor = CountingExecutor(tmp_path)
+    first, _, _ = run(gw, tmp_path, executor=executor, resume=gw.request_id)
+    second, _, _ = run(gw, tmp_path, executor=executor, resume=gw.request_id)
+    assert (first, second) == (EXIT_EXECUTED, EXIT_GATE_REFUSED)
+    assert len(executor.inner.executions) == 1
+
+
+@pytest.mark.parametrize(
+    "decided_at",
+    ["2026-10-24T11:00:00Z", "2026-10-24T11:00:01Z"],  # at or after the deadline
+)
+def test_an_approval_decided_at_or_after_its_deadline_is_refused(tmp_path, decided_at):
+    gw = ScriptedGateway([])
+    gw.script = [lambda: parse_status(with_deadline(gw.payload("approved"), decided_at=decided_at))]
+    code, executor, lines = run(gw, tmp_path)
+    assert code == EXIT_GATE_REFUSED and executor.calls == 0
+    assert any("not decided before the request's deadline" in line for line in lines)
+
+
+def test_approval_without_a_deadline_is_unaffected(tmp_path):
+    gw = ScriptedGateway([])
+    gw.script = [gw.payload("approved")]  # expires_at None, deadline_passed False
+    code, executor, _ = run(gw, tmp_path)
+    assert code == EXIT_EXECUTED and executor.calls == 1
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["pending", "condition", "reapproval"],
+)
+def test_undecided_requests_past_their_deadline_never_execute(tmp_path, kind):
+    """Pending, condition-blocked or awaiting re-approval when the deadline passes: the
+    backend reports deadline_passed (status still pending until the worker expires it)."""
+    gw = ScriptedGateway([])
+    gw.script = [with_deadline(gw.payload(kind))]
+    code, executor, _ = run(gw, tmp_path)
+    assert code == EXIT_EXPIRED and executor.calls == 0
+
+
+@pytest.mark.parametrize("kind", ["expired", "rejected"])
+def test_final_unapproved_requests_past_their_deadline_never_execute(tmp_path, kind):
+    gw = ScriptedGateway([])
+    gw.script = [with_deadline(gw.payload(kind))]
+    code, executor, _ = run(gw, tmp_path)
+    assert code in (EXIT_EXPIRED, EXIT_REJECTED) and executor.calls == 0

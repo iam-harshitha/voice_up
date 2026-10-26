@@ -16,6 +16,13 @@ escalation, decision deadlines, conditional approvals that can never authorize b
 themselves, policy audit events, and an audit timeline API. The exact semantics,
 states, endpoints and a walkthrough are in **[docs/policies.md](docs/policies.md)**.
 
+Chunk 5 hardens and packages it: idempotent request creation, production fail-closed
+configuration, failure-injection tests, a safe `demo-seed` command, one-command local
+startup (`../scripts/start-demo.ps1`), CI, deployment artifacts and measured latency. See
+**[docs/demo-runbook.md](docs/demo-runbook.md)**, **[docs/deployment.md](docs/deployment.md)**,
+**[docs/security.md](docs/security.md)**, **[docs/performance.md](docs/performance.md)** and
+**[docs/demo-pitch.md](docs/demo-pitch.md)**.
+
 Chunk 4 adds the operator dashboard (`../frontend`, with browser sign-in via HttpOnly
 session cookies and CSRF protection), an MCP server that exposes approval tools to
 agents, and a demo agent that only performs a simulated deployment after an explicit,
@@ -152,7 +159,7 @@ An agent key should have only `requests:create,requests:read`. It must never hol
 | `POST /policies` | policies:write | `required_approvals` 1 or 2 + exactly that many distinct active approvers |
 | `GET /policies`, `GET /policies/{id}` | policies:read | `?is_active=` filter |
 | `PATCH /policies/{id}` | policies:write | any change bumps `version` |
-| `POST /requests` | requests:create | `policy_id`, `action`, `summary`, `context` (object, ≤16 KB) |
+| `POST /requests` | requests:create | `policy_id`, `action`, `summary`, `context` (object, ≤16 KB); optional `Idempotency-Key` header (8–128 chars): a retry returns the original (200, `Idempotent-Replayed: true`), the same key with a different payload returns 422 `idempotency_key_reused` |
 | `GET /requests`, `GET /requests/{id}` | requests:read | `?status=pending\|approved\|rejected\|expired`, `?include_evaluation=true`; detail includes `evaluation`, `expires_at`, snapshot `policy` and named `approvers` |
 | `GET /requests/stats` | requests:read | exact counts by status, plus engine-derived condition/re-approval/deadline counts (bounded; see `evaluation_complete`) |
 | `GET /audit-events/recent` | audit:read | newest organization events, `?limit≤50` |
@@ -263,7 +270,8 @@ app/services/                 business operations and transaction boundaries
 app/api/                      FastAPI routes; dependencies.py has auth/tenant/scope layers
 app/db/models/                SQLAlchemy models; migrations/ holds the Alembic history
 app/core/                     settings, API-key crypto, error format, JSON logging
-app/cli.py                    org / API-key / dashboard-user bootstrap, voice-simulate
+app/cli.py                    org / API-key / dashboard-user bootstrap, demo-seed, voice-simulate
+scripts/measure_latency.py    bounded latency measurements (test database only)
 approval_line_agents/         MCP server, strict REST client, demo agent (talk to the API over HTTP)
 ../frontend/                  React dashboard
 ```
@@ -299,6 +307,4 @@ approval_line_agents/         MCP server, strict REST client, demo agent (talk t
 - Separate migration-owner and runtime database roles, so the runtime role can only
   `INSERT`/`SELECT` audit events.
 - Key rotation metadata (last used, expiry) on `api_keys`.
-- An `Idempotency-Key` for `POST /requests` (agents cannot safely retry an ambiguous
-  creation today; the MCP server and demo agent therefore never retry it).
 - Per-IP sign-in rate limiting, MFA/SSO, idle session timeout for the dashboard.

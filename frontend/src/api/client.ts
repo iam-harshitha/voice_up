@@ -73,6 +73,7 @@ type Method = "GET" | "POST" | "PATCH";
 
 interface RequestOptions {
   body?: unknown;
+  headers?: Record<string, string>;
   signal?: AbortSignal;
   timeoutMs?: number;
   query?: Record<string, string | number | boolean | null | undefined>;
@@ -105,7 +106,7 @@ export async function apiRequest<T>(method: Method, path: string, options: Reque
   const onAbort = () => controller.abort("cancelled");
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
-  const headers: Record<string, string> = { Accept: "application/json" };
+  const headers: Record<string, string> = { Accept: "application/json", ...options.headers };
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && csrfToken) headers["X-CSRF-Token"] = csrfToken;
 

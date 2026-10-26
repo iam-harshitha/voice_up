@@ -1,0 +1,51 @@
+# Production-shaped example: API, worker, one-shot migration and dashboard.
+# NOT a turnkey deployment. Put a TLS-terminating reverse proxy or load balancer in front
+# of "web", use a managed PostgreSQL (or your own, with backups), and inject secrets with
+# your platform's secret manager. See backend/docs/deployment.md.
+#
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.production run --rm migrate
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.production up -d api worker web
+#
+# deploy/.env.production is git-ignored (.env.* pattern) and must never be committed.
+#
+# APP_ENV is pinned to production below for every backend service: `environment` takes
+# precedence over `env_file`, so a missing or wrong APP_ENV in the env file cannot turn
+# off the production safeguards (no mock voice, Secure cookies, https-only CORS, no API
+# docs). Secrets still come only from the env file / secret manager.
+x-backend-env: &backend-env
+  APP_ENV: production
+
+services:
+  migrate:
+    build: ../backend
+    env_file: .env.production
+    environment: *backend-env
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    build: ../backend
+    env_file: .env.production
+    environment: *backend-env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    build: ../backend
+    env_file: .env.production
+    environment: *backend-env
+    # A separate process: the API never runs jobs. Several workers may run safely.
+    command: ["python", "-m", "app.workers.voice_worker"]
+    restart: unless-stopped
+
+  web:
+    build: ../frontend
+    restart: unless-stopped
+    depends_on: [api]
+    ports:
+      # Bind to localhost; expose publicly only through the TLS terminator.
+      - "127.0.0.1:8080:8080"

@@ -1,0 +1,12 @@
+# Keep the build context to sources only. Dependencies are installed INSIDE the Linux
+# build image by `npm ci`; host-installed node_modules (e.g. Windows native binaries)
+# must never be copied over them.
+node_modules
+dist
+coverage
+*.tsbuildinfo
+.vite
+.env
+.env.*
+npm-debug.log*
+.DS_Store
