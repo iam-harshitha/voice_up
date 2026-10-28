@@ -67,6 +67,8 @@ class DecisionChoice(StrEnum):
     REJECT = "reject"
     UNCERTAIN = "uncertain"
     NEEDS_CLARIFICATION = "needs_clarification"
+    # "Approve, but only after X". Recorded as a condition, never as a vote.
+    CONDITIONAL_APPROVE = "conditional_approve"
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,8 @@ class ProviderExecution:
     correlation_id: str | None = None
     decision: ExtractedAnswer | None = None
     identity: ExtractedAnswer | None = None
+    # Free text of the condition the approver stated (only for conditional approvals).
+    condition_text: str | None = None
     # True when the extraction block existed but could not be parsed.
     extraction_malformed: bool = False
 
@@ -120,12 +124,16 @@ class ErrorKind(StrEnum):
 
 
 class VoiceProviderError(Exception):
-    """A provider failure carrying a safe category, never raw provider text or secrets."""
+    """A provider failure carrying a safe category and, for logs only, an optional
+    sanitized provider message. Never raw provider text or secrets."""
 
-    def __init__(self, kind: ErrorKind, category: str) -> None:
+    def __init__(self, kind: ErrorKind, category: str, detail: str | None = None) -> None:
         super().__init__(f"{kind.value}:{category}")
         self.kind = kind
         self.category = category
+        # The provider's own explanation, already sanitized by the adapter (no digit
+        # runs, no long tokens, truncated). Logged only; never part of str(self).
+        self.detail = detail
 
 
 class VoiceProvider(Protocol):

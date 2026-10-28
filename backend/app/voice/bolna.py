@@ -17,6 +17,7 @@ Bolna documents no idempotency key for POST /call, so any failure after the requ
 have reached Bolna is reported as AMBIGUOUS and never retried automatically.
 """
 
+import re
 from typing import Any
 from uuid import UUID
 
@@ -69,6 +70,38 @@ def map_status(provider_status: str) -> CallStatus | None:
     return _STATUS_MAP.get(provider_status)
 
 
+MAX_ERROR_DETAIL = 160
+_DIGIT_RUN = re.compile(r"\+?\d[\d\s().-]{5,}\d")  # phone numbers, account numbers
+_LONG_TOKEN = re.compile(r"[A-Za-z0-9_\-]{24,}")  # keys, tokens, IDs
+_EMAIL = re.compile(r"\S+@\S+")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def error_detail(response: httpx.Response) -> str | None:
+    """Bolna's explanation of a refused request, safe to log.
+
+    Only the documented ``message`` (or a string ``error``) is read, never the whole
+    body. Phone numbers, e-mail addresses and anything token-like are redacted.
+    """
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    message = data.get("message")
+    if not isinstance(message, str):
+        message = data.get("error") if isinstance(data.get("error"), str) else None
+    if not message:
+        return None
+    text = _CONTROL.sub(" ", message)
+    text = _EMAIL.sub("<redacted>", text)
+    text = _DIGIT_RUN.sub("<redacted>", text)
+    text = _LONG_TOKEN.sub("<redacted>", text)
+    text = " ".join(text.split())[:MAX_ERROR_DETAIL]
+    return text or None
+
+
 def _answer(block: Any) -> tuple[ExtractedAnswer | None, bool]:
     """Read one extraction result. Returns (answer, malformed)."""
     if block is None:
@@ -84,6 +117,24 @@ def _answer(block: Any) -> tuple[ExtractedAnswer | None, bool]:
     ):
         return None, True
     return ExtractedAnswer(value, float(confidence) if confidence is not None else None), False
+
+
+MAX_CONDITION_TEXT = 500
+
+
+def _free_text(block: Any) -> tuple[str | None, bool]:
+    """Read a free-text extraction (its ``subjective`` answer). Returns (text, malformed)."""
+    if block is None:
+        return None, False
+    if not isinstance(block, dict):
+        return None, True
+    text = block.get("subjective")
+    if text is None:
+        return None, False
+    if not isinstance(text, str):
+        return None, True
+    text = " ".join(text.split())[:MAX_CONDITION_TEXT]
+    return text or None, False
 
 
 def normalize_execution(payload: Any, settings: Settings) -> ProviderExecution:
@@ -113,6 +164,7 @@ def normalize_execution(payload: Any, settings: Settings) -> ProviderExecution:
     correlation = recipient_data.get(CORRELATION_VARIABLE)
 
     decision = identity = None
+    condition_text = None
     malformed = False
     extracted = payload.get("extracted_data")
     if extracted is not None:
@@ -125,7 +177,10 @@ def normalize_execution(payload: Any, settings: Settings) -> ProviderExecution:
             elif isinstance(category, dict):
                 decision, bad_decision = _answer(category.get(settings.bolna_decision_extraction))
                 identity, bad_identity = _answer(category.get(settings.bolna_identity_extraction))
-                malformed = bad_decision or bad_identity
+                condition_text, bad_condition = _free_text(
+                    category.get(settings.bolna_condition_extraction)
+                )
+                malformed = bad_decision or bad_identity or bad_condition
 
     return ProviderExecution(
         provider_call_id=execution_id,
@@ -137,6 +192,7 @@ def normalize_execution(payload: Any, settings: Settings) -> ProviderExecution:
         correlation_id=correlation if isinstance(correlation, str) else None,
         decision=decision,
         identity=identity,
+        condition_text=condition_text,
         extraction_malformed=malformed,
     )
 
@@ -199,11 +255,14 @@ class BolnaProvider:
         if code in (401, 403):
             raise VoiceProviderError(ErrorKind.PERMANENT, "auth_failed")
         if code == 429:
-            raise VoiceProviderError(ErrorKind.RETRYABLE, "rate_limited")
+            raise VoiceProviderError(ErrorKind.RETRYABLE, "rate_limited", error_detail(response))
         if code == 503:
             raise VoiceProviderError(ErrorKind.RETRYABLE, "provider_unavailable")
         if 400 <= code < 500:
-            raise VoiceProviderError(ErrorKind.PERMANENT, f"rejected_{code}")
+            # e.g. 400 "Trial accounts can only make calls to verified phone numbers."
+            raise VoiceProviderError(
+                ErrorKind.PERMANENT, f"rejected_{code}", error_detail(response)
+            )
         # 500/502/504 etc.: the call may or may not have been created.
         raise VoiceProviderError(ErrorKind.AMBIGUOUS, f"provider_error_{code}")
 

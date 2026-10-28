@@ -53,6 +53,11 @@ class ConflictError(AppError):
     code = "conflict"
 
 
+class UnprocessableError(AppError):
+    status_code = 422
+    code = "unprocessable"
+
+
 class ServiceUnavailableError(AppError):
     status_code = 503
     code = "service_unavailable"

@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.domain.approval_rules import RequestStatus
 from app.schemas.common import ApiOutput, StrictInput, bounded_text
@@ -33,6 +33,52 @@ class ApprovalRequestCreate(StrictInput):
         return value
 
 
+class EvaluationRead(BaseModel):
+    """Server-derived policy evaluation. Only ``authorized: true`` permits the action."""
+
+    state: str  # awaiting_approvals | waiting_for_condition | approved | rejected | expired
+    reason: str
+    authorized: bool
+    next_action: str  # await_decisions | resolve_condition | none
+    approvals: int
+    rejections: int
+    required_approvals: int
+    veto_triggered: bool
+    outstanding_approver_ids: list[UUID]
+    condition_approver_ids: list[UUID]
+    # Who must re-approve (the approver who stated the satisfied condition; possibly a
+    # backup), and the seats they hold, in the same order.
+    reapproval_approver_ids: list[UUID]
+    reapproval_seat_ids: list[UUID]
+    deadline_passed: bool
+    expires_at: datetime | None
+
+
+class PolicySnapshotRead(BaseModel):
+    """The immutable rules the request was created under (from its snapshot)."""
+
+    schema_version: int
+    policy_id: UUID
+    name: str
+    version: int
+    approval_mode: str
+    required_approvals: int
+    veto_mode: str
+    deadline_seconds: int | None
+    escalation_after_seconds: int | None
+    max_escalations: int
+
+
+class RequestApproverRead(BaseModel):
+    """Who may decide the request, from the immutable snapshot. No contact details."""
+
+    approver_id: UUID
+    name: str
+    role: str  # primary (holds a seat) | backup (may be assigned a seat by escalation)
+    can_veto: bool
+    position: int
+
+
 class ApprovalRequestSummary(ApiOutput):
     id: UUID
     policy_id: UUID
@@ -44,9 +90,39 @@ class ApprovalRequestSummary(ApiOutput):
     created_at: datetime
     updated_at: datetime
     decided_at: datetime | None
+    expires_at: datetime | None
+    # Present on detail responses, and on list responses with ?include_evaluation=true.
+    evaluation: EvaluationRead | None = None
 
 
 class ApprovalRequestRead(ApprovalRequestSummary):
     context: dict[str, Any]
     authorized_approver_ids: list[UUID]
     votes: list[VoteRead]
+    policy: PolicySnapshotRead | None = None
+    approvers: list[RequestApproverRead] = Field(default_factory=list)
+
+
+class RequestStatusCounts(BaseModel):
+    pending: int
+    approved: int
+    rejected: int
+    expired: int
+
+
+class RequestStats(BaseModel):
+    """Organization-wide counts. Status counts are exact (database aggregates).
+
+    The evaluation-derived counts are computed by evaluating the most recent pending
+    requests, at most ``pending_evaluation_limit`` of them; ``evaluation_complete`` says
+    whether every pending request was included.
+    """
+
+    total: int
+    by_status: RequestStatusCounts
+    pending_waiting_for_condition: int
+    pending_awaiting_reapproval: int
+    pending_deadline_passed: int
+    pending_evaluated: int
+    pending_evaluation_limit: int
+    evaluation_complete: bool

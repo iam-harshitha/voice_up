@@ -1,4 +1,7 @@
-"""Voice job worker: python -m app.workers.voice_worker [--once] [--worker-id NAME]
+"""Workflow worker: python -m app.workers.voice_worker [--once] [--worker-id NAME]
+
+Processes voice jobs (when VOICE_PROVIDER is set) and request jobs (deadline expiry,
+escalation rounds; always).
 
 Run any number of these; jobs are claimed with FOR UPDATE SKIP LOCKED and leased, so a
 job is processed by one worker at a time and is picked up again if a worker dies.
@@ -38,12 +41,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: invalid configuration: {exc.errors()[0]['msg']}", file=sys.stderr)
         return 2
     configure_logging(settings.log_level)
-    try:
-        provider = build_voice_provider(settings)
-    except (ServiceUnavailableError, ValueError) as exc:
-        logger.error("voice_worker.not_configured", extra={"reason": getattr(exc, "code", "")})
-        print("error: voice provider is not configured (set VOICE_PROVIDER)", file=sys.stderr)
-        return 2
+    provider = None
+    if settings.voice_provider != "disabled":
+        try:
+            provider = build_voice_provider(settings)
+        except (ServiceUnavailableError, ValueError):
+            logger.error("voice_worker.not_configured")
+            print("error: the configured voice provider is invalid", file=sys.stderr)
+            return 2
+    else:
+        # Deadlines and escalation rounds must still run without voice.
+        logger.info("voice_worker.voice_disabled_running_workflow_jobs_only")
 
     engine = build_engine(settings)
     session_factory = build_session_factory(engine)
@@ -57,7 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, request_stop)
 
     logger.info(
-        "voice_worker.started", extra={"worker_id": args.worker_id, "provider": provider.name}
+        "voice_worker.started",
+        extra={"worker_id": args.worker_id, "provider": provider.name if provider else None},
     )
     reconcile_every = max(30.0, settings.voice_reconcile_after_seconds / 4)
     next_reconcile = 0.0

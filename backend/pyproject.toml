@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "approval-line"
 version = "0.1.0"
-description = "Voice-native human authorization for AI agents (Chunk 1: core approval backend)."
+description = "Voice-native human authorization for AI agents."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -21,16 +21,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# MCP server and demo agent (they talk to the API over HTTP; the API does not need this).
+agents = [
+    "mcp>=2.3,<3",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "mcp>=2.3,<3",
 ]
 
 [project.scripts]
 approval-line = "app.cli:main"
+approval-line-mcp = "approval_line_agents.mcp_server:main"
+approval-line-demo-agent = "approval_line_agents.demo:main"
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["app*", "approval_line_agents*"]
 
 [tool.ruff]
 line-length = 100

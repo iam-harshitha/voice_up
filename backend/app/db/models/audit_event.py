@@ -23,6 +23,13 @@ class AuditEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
             ["approval_requests.id", "approval_requests.organization_id"],
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["policy_id", "organization_id"],
+            ["approval_policies.id", "approval_policies.organization_id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("request_id IS NOT NULL OR policy_id IS NOT NULL", name="has_subject"),
+        Index("ix_audit_events_policy_id_sequence", "policy_id", "sequence"),
         Index("ix_audit_events_request_id_created_at", "request_id", "created_at"),
         Index("ix_audit_events_request_id_sequence", "request_id", "sequence"),
     )
@@ -32,6 +39,8 @@ class AuditEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     sequence: Mapped[int] = mapped_column(BigInteger, Identity(always=True), unique=True)
 
     organization_id: Mapped[uuid.UUID] = mapped_column(index=True)
-    request_id: Mapped[uuid.UUID]
+    # Request events carry request_id; policy administration events carry policy_id.
+    request_id: Mapped[uuid.UUID | None]
+    policy_id: Mapped[uuid.UUID | None]
     event_type: Mapped[str] = mapped_column(String(64))
     event_data: Mapped[dict[str, Any]]

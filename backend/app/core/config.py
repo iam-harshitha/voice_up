@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
     db_connect_timeout_seconds: int = Field(default=5, ge=1, le=60)
 
+    # --- Dashboard sign-in (Chunk 4) ---------------------------------------------------
+    # Absolute lifetime of a dashboard session (no sliding renewal).
+    dashboard_session_ttl_seconds: int = Field(default=8 * 3600, ge=300, le=7 * 24 * 3600)
+    # Secure flag on the session cookie. Defaults to on in production; set false only for
+    # plain-http local development.
+    dashboard_cookie_secure: bool | None = None
+    # Consecutive failed sign-ins before an account is locked, and for how long.
+    dashboard_max_failed_logins: int = Field(default=5, ge=1, le=50)
+    dashboard_lockout_seconds: int = Field(default=900, ge=30, le=24 * 3600)
+
     # --- Voice approvals (Chunk 2) ---------------------------------------------------
     # "disabled" turns voice off; "mock" is for tests and local development only and is
     # refused in production; "bolna" requires the credentials below.
@@ -47,6 +57,9 @@ class Settings(BaseSettings):
     bolna_extraction_category: str = "Approval"
     bolna_decision_extraction: str = "Decision"
     bolna_identity_extraction: str = "Identity Confirmed"
+    # Free-text extraction holding what a conditional approval requires (stored, never
+    # interpreted).
+    bolna_condition_extraction: str = "Condition"
     # Sent by Bolna as a custom webhook header; compared in constant time.
     voice_webhook_token: SecretStr | None = None
     voice_webhook_max_bytes: int = Field(default=256 * 1024, ge=1024, le=5 * 1024 * 1024)
@@ -130,6 +143,27 @@ class Settings(BaseSettings):
             raise ValueError("VOICE_RETRY_MAX_SECONDS must be >= VOICE_RETRY_BASE_SECONDS")
         if self.voice_call_timeout_seconds <= self.voice_reconcile_after_seconds:
             raise ValueError("VOICE_CALL_TIMEOUT_SECONDS must exceed VOICE_RECONCILE_AFTER_SECONDS")
+        return self
+
+    @field_validator("dashboard_cookie_secure", mode="before")
+    @classmethod
+    def _empty_means_default(cls, value: object) -> object:
+        # An empty DASHBOARD_COOKIE_SECURE= (as in .env.example) means "use the default".
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @property
+    def session_cookie_secure(self) -> bool:
+        if self.dashboard_cookie_secure is None:
+            return self.app_env == "production"
+        return self.dashboard_cookie_secure
+
+    @model_validator(mode="after")
+    def _check_dashboard_configuration(self) -> Self:
+        if self.app_env == "production" and self.dashboard_cookie_secure is False:
+            raise ValueError("DASHBOARD_COOKIE_SECURE=false is not allowed when APP_ENV=production")
+        insecure = [o for o in self.cors_origins if not o.startswith("https://")]
+        if self.app_env == "production" and insecure:
+            raise ValueError("CORS_ORIGINS must use https:// origins when APP_ENV=production")
         return self
 
     @field_validator("api_v1_prefix")

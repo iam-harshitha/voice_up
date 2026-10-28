@@ -5,10 +5,13 @@ This guide covers how Approval Line places approval phone calls through
 also covers what to configure when credentials arrive, and what is verified versus
 assumed.
 
-> **Status (2026-10-24):** the Bolna adapter is written against the official docs.
-> Its behaviour is tested only with a mocked HTTP transport and with the mock provider.
-> **No real Bolna call or callback has been made yet.** Treat the live integration as
-> unverified until the checklist at the end passes.
+> **Status (2026-10-28):** one real end-to-end call has succeeded: an explicit spoken
+> approval became a voice vote and the request became `approved` with
+> `evaluation.authorized: true` (see [Live verification](#live-verification)). Every
+> other path, including rejection, uncertainty, conditional approval and no-answer, is
+> verified only with the mock provider and a mocked HTTP transport. This is a verified
+> demo setup on a Bolna trial account behind a quick tunnel, **not** a production
+> deployment.
 
 ## How it works
 
@@ -29,8 +32,9 @@ worker ── terminal status? GET /executions/{id} (our API key) ──▶ inte
   commit in one transaction (`record_vote` runs in a savepoint).
 - **Anything other than an explicit, confident approve/reject is not a vote.** That
   includes unanswered, busy, voicemail, uncertain, needs-clarification, malformed or
-  low-confidence answers, an unconfirmed identity, and a mismatched agent, number or
-  correlation ID. The call records a safe `outcome`, and the request stays pending.
+  low-confidence answers, an unconfirmed identity, a mismatched agent or number, and a
+  missing or mismatched correlation ID. The call records a safe `outcome`, and the
+  request stays pending.
 
 ### Modules
 
@@ -62,7 +66,7 @@ decided or the approver had already voted differently).
 
 ## Verified Bolna contract
 
-Verified against the official docs on **2026-10-24**:
+Verified against the official docs on **2026-10-24**, re-checked on **2026-10-28**:
 
 | Topic | Contract | Source |
 |---|---|---|
@@ -72,7 +76,8 @@ Verified against the official docs on **2026-10-24**:
 | Read call | `GET /executions/{execution_id}` returns the execution object | [get execution](https://www.bolna.ai/docs/api-reference/executions/get_execution) |
 | Webhook | `POST` of the same execution object, sent on every status change, from IPs `13.203.39.153`, `13.126.9.249`, `13.202.133.53`. Custom headers can be added. No signature and no event ID; key idempotency on `id`. | [webhooks](https://www.bolna.ai/docs/polling-call-status-webhooks), [payload](https://www.bolna.ai/docs/api-reference/executions/payload), [extractions tab](https://www.bolna.ai/docs/agent-setup/analytics-tab) |
 | Statuses | `scheduled, queued, rescheduled, initiated, ringing, in-progress, call-disconnected, completed, balance-low, busy, no-answer, canceled, failed, stopped, error`. `completed` is final, after extraction finishes. | [statuses](https://www.bolna.ai/docs/list-phone-call-status) |
-| Decisions | `extracted_data[<Category>][<Extraction>] = {objective, confidence (0–1), …}`; `objective` holds the selected pre-defined answer | [extraction output](https://www.bolna.ai/docs/prompting/extraction-output) |
+| Decisions | `extracted_data[<Category>][<Extraction>] = {objective, subjective, confidence (0–1), confidence_label, reasoning_objective, reasoning_subjective, validation}`; `objective` holds the selected pre-defined answer, `subjective` the free text. Keys are the display names as typed in the dashboard (confirmed live). | [extraction output](https://www.bolna.ai/docs/prompting/extraction-output), [payload](https://www.bolna.ai/docs/api-reference/executions/payload) |
+| Prompt variables | `user_data` keys are referenced as `{{name}}` in the prompt and welcome message | [make call](https://www.bolna.ai/docs/api-reference/calls/make), [API quickstart](https://www.bolna.ai/docs/quickstarts/api) |
 | Variables echo | Per-call variables come back in `context_details.recipient_data` | [extractions migration](https://www.bolna.ai/docs/migrating-to-extractions/overview), [payload](https://www.bolna.ai/docs/api-reference/executions/payload) |
 | Rate limit | HTTP `429`; no published request rate | [limits](https://www.bolna.ai/docs/api-reference/limits) |
 
@@ -89,21 +94,45 @@ Verified against the official docs on **2026-10-24**:
   retries; the workflow-webhook page says it does not. We answer 2xx only after the
   event is committed, return 503 on storage failure, and poll Bolna for calls without a
   final update (reconciliation), so a lost webhook is recovered either way.
-- **Variable syntax in prompts.** The quickstart shows `{{customer_name}}`, while other
-  pages show `{name}`. Check which one your agent editor accepts.
-- **Exact extraction key strings.** The docs show display names ("Lead Quality"), but
-  don't say whether keys are slugified. Confirm against a real execution and adjust the
-  `BOLNA_*_EXTRACTION` settings.
 - **PII masking.** If it's enabled on the account, `extracted_data` string values become
   `null`, so no decision can ever be read. Keep masking off for the approval agent, or
-  expect every call to end as `identity_not_confirmed`.
+  expect every call to end as `identity_not_confirmed`. (It was off on the account used
+  for the live test.)
+- **Correlation.** An execution is accepted only if its `id` is the `execution_id` that
+  Bolna returned to *our* `POST /call`, its `agent_id` is ours, and the echoed
+  `context_details.recipient_data.approval_line_call_id` is present and equals the
+  internal call ID. A missing or different value is `correlation_mismatch` and no vote.
+  `telephony_data.to_number` (or `context_details.recipient_phone_number`) must equal the
+  dialled number **when present**; it is not required, because PII masking nulls phone
+  numbers. Bolna returned both values in the live test.
 
-## Configuring Bolna when credentials arrive
+## Configuring Bolna
 
-1. **API key:** create one in the Bolna dashboard and set `BOLNA_API_KEY` in
-   `backend/.env`. Never put it in code.
-2. **Agent:** create an outbound voice agent and set `BOLNA_AGENT_ID`. Its prompt must
-   use the per-call variables below, in whichever syntax the editor accepts:
+Settings in `backend/.env` (placeholders only; never commit real values):
+
+```
+VOICE_PROVIDER=bolna                      # mock for local development and tests
+BOLNA_API_KEY=<from the Bolna dashboard>
+BOLNA_AGENT_ID=<agent UUID>               # a UUID, not the agent's display slug
+VOICE_WEBHOOK_TOKEN=<python -c "import secrets;print(secrets.token_urlsafe(32))">
+BOLNA_EXTRACTION_CATEGORY=Decision
+BOLNA_DECISION_EXTRACTION=Approval
+# BOLNA_IDENTITY_EXTRACTION=Identity Confirmed   (default)
+# BOLNA_CONDITION_EXTRACTION=Condition           (default)
+# BOLNA_FROM_PHONE_NUMBER=+91XXXXXXXXXX          (optional; Bolna's default otherwise)
+# VOICE_RECONCILE_AFTER_SECONDS=120              (default 600; lower for demos)
+```
+
+The code defaults for the category and decision names are `Approval` and `Decision`
+(the reverse of the agent used here), so set both explicitly to whatever your agent's
+Extractions tab shows. A mismatch fails closed: every call ends `identity_not_confirmed`.
+
+1. **API key:** create one in the Bolna dashboard and set `BOLNA_API_KEY`. Never put it
+   in code.
+2. **Agent:** create an outbound voice agent and set `BOLNA_AGENT_ID`. Its welcome
+   message and prompt use the per-call variables below, written as `{{name}}` (the
+   documented syntax; single braces are read aloud literally). Use no other variables;
+   Approval Line sends only these:
 
    | Variable | Meaning |
    |---|---|
@@ -115,45 +144,106 @@ Verified against the official docs on **2026-10-24**:
    | `allowed_decisions` | "approve or reject" |
    | `approval_line_call_id` | Correlation ID. Never read it aloud. |
 
-   Suggested prompt outline:
-   > You are an automated assistant from Approval Line calling **{approver_name}** for an
-   > approval decision. First confirm you are speaking with {approver_name}; if not, end
-   > politely. Explain: "An automated agent is requesting approval to
-   > {requested_action}: {request_summary}. Details: {request_details}. Risk:
-   > {risk_details}. Reference {request_reference}." Say clearly that **nothing has
-   > been executed yet**. Ask whether they approve or reject. Answer questions only from
-   > these facts; never invent details. Never encourage approval. If they are unsure, or
-   > want conditions or more information, do not record approval. Before ending, repeat
-   > their decision back and ask them to confirm it.
-3. **Extractions:** in the agent's Extractions tab, create category **`Approval`** with
-   two pre-defined-answer extractions:
-   - **`Decision`**, with answers exactly `approve`, `reject`, `uncertain`,
-     `needs_clarification`. Prompt: "The approver's final, confirmed decision. Use
-     approve or reject only if they explicitly and unconditionally said so and confirmed
-     it; otherwise uncertain or needs_clarification."
-   - **`Identity Confirmed`**, with answers `yes` and `no`. Prompt: "Did the person
-     confirm they are {approver_name}?"
+   Welcome message used in the live test: "Hello, this is the automated approval
+   assistant from Approval Line. Am I speaking with {{approver_name}}?"
 
-   If you choose other names, set `BOLNA_EXTRACTION_CATEGORY`,
-   `BOLNA_DECISION_EXTRACTION` and `BOLNA_IDENTITY_EXTRACTION`.
+   Prompt outline (the live test used a longer version of this):
+   > You are an automated assistant from Approval Line calling **{{approver_name}}** for
+   > an approval decision. First confirm you are speaking with {{approver_name}}; if
+   > not, end politely without describing the request. Explain: "An automated agent is
+   > requesting approval to {{requested_action}}. Summary: {{request_summary}}. Details:
+   > {{request_details}}. Risk: {{risk_details}}. The reference is
+   > {{request_reference}}. This request needs {{required_approvals}} approval(s)."
+   > Say clearly that **nothing has been done yet**. Ask whether they approve or reject
+   > ({{allowed_decisions}}). Answer questions only from these facts; never invent
+   > details. Never encourage approval. If they are unsure, or want conditions or more
+   > information, do not record approval. Before ending, repeat their decision back
+   > with the reference and ask them to confirm it. Never read out
+   > approval_line_call_id.
+3. **Extractions:** in the agent's Extractions tab, create one category (the live agent
+   uses **`Decision`**) with:
+   - **`Approval`** (pre-defined answers), with answers exactly `approve`, `reject`,
+     `uncertain`, `needs_clarification` and `conditional_approve`. Prompt: "The
+     approver's final, confirmed decision. Use approve or reject only if they explicitly
+     and unconditionally said so and confirmed it. Use conditional_approve if they
+     approve only once something else happens. Otherwise use uncertain or
+     needs_clarification."
+   - **`Identity Confirmed`** (pre-defined answers), with answers `yes` and `no`.
+     Prompt: "Did the person confirm they are {approver_name}?"
+   - **`Condition`** (free text). Prompt: "If the approver approved only on a
+     condition, state the condition in one sentence; otherwise leave empty."
+     Approval Line stores this text; it never interprets it, and a conditional answer
+     never becomes a vote (see `policies.md`). A `conditional_approve` without condition
+     text is recorded as `condition_missing` and treated as no decision.
+
+   Set `BOLNA_EXTRACTION_CATEGORY`, `BOLNA_DECISION_EXTRACTION`,
+   `BOLNA_IDENTITY_EXTRACTION` and `BOLNA_CONDITION_EXTRACTION` to the names exactly as
+   shown in the dashboard (they are case- and space-sensitive). Free-text answers come
+   back in `subjective` (confirmed live).
 4. **Webhook:** in the Extractions tab's webhook card, set the URL to
-   `https://<public-host>/api/v1/voice/webhooks/bolna`. Turn on **Add headers** and add
-   `X-Approval-Line-Webhook-Token: <VOICE_WEBHOOK_TOKEN>`. Leave "Trigger on statuses"
-   at all statuses. Allowlist Bolna's three IPs at your proxy or firewall.
-5. **Server:** set `VOICE_PROVIDER=bolna`, then restart the API and start the worker.
-   Startup fails if the key, agent ID or webhook token is missing. It never falls back
-   to the mock.
+   `https://<public-host>/api/v1/voice/webhooks/bolna`. In **Headers (JSON)** add
+   `{"X-Approval-Line-Webhook-Token": "<VOICE_WEBHOOK_TOKEN>"}`, then **Save agent**.
+   Leave "Trigger on statuses" at all statuses. Allowlist Bolna's three IPs at your
+   proxy or firewall (not enforced by the application).
+5. **Telephony:** outbound calls need a telephony provider for the destination country
+   (the live agent used Vobiz for India; Bolna lists Twilio for most other countries).
+   **Trial accounts can only call verified numbers**: verify the approver's number in
+   the Bolna dashboard first, or `POST /call` returns 400 and the call ends
+   `failed` / `initiation_rejected`. The worker logs Bolna's sanitized reason as
+   `provider_message` on `voice.call_initiation_rejected`.
+6. **Server:** set `VOICE_PROVIDER=bolna`, restart the API (from `backend/`, so it reads
+   `backend/.env`), and start the worker. Startup fails if the key, agent ID or webhook
+   token is missing. It never falls back to the mock. Calls are placed only for an
+   explicit `POST /requests/{id}/voice-calls` (or the dashboard button); creating a
+   request never dials anyone.
 
-### Live verification checklist (not yet done)
+### Bolna's "Send test" button returns 400, by design
 
-- [ ] `POST /requests/{id}/voice-calls`, then run the worker: the phone rings, and the
-      call shows `initiated` with a `provider_call_id`.
-- [ ] Bolna's "Send test" webhook returns 200 (the token header is present).
-- [ ] Answer, confirm identity, approve: the call shows `completed` / `accepted`, and a
-      vote exists.
-- [ ] Compare a real execution's `extracted_data` keys and values with the settings.
-- [ ] A no-answer call ends `failed` / `no-answer`, with no vote.
-- [ ] Turn the webhook off for one call: reconciliation still records the result.
+The dashboard's **Send test** posts a fixed sample, not a real execution: its `id` is a
+21-character slug rather than a UUID, its `agent_id` is a short slug, and its
+`extracted_data` uses the retired flat layout. The endpoint checks the token first, so:
+
+| Send test result | Meaning |
+|---|---|
+| `400 invalid_payload` | Token accepted; the sample was refused at the UUID check. **This is the expected result.** |
+| `401 webhook_unauthorized` | The header is missing or holds a different token. |
+| `404` | Voice is disabled (`VOICE_PROVIDER=disabled`) or no token is configured. |
+| 502 / timeout | The API or the tunnel is down. |
+
+Do not relax the UUID check to make Send test return 200. The execution ID is put into
+the `GET /executions/{id}` URL, and accepting non-UUID IDs would let a token holder steer
+that request. Real executions always carry UUIDs.
+
+### Live verification
+
+First live test, 2026-10-28, one approver, Bolna trial account, Vobiz (India), API
+behind a Cloudflare quick tunnel:
+
+- [x] `POST /call` accepted (200, `queued`) after the number was verified in Bolna. The
+      two earlier attempts were refused (400, trial account, unverified number), ended
+      `failed` / `initiation_rejected`, and recorded no vote.
+- [x] The phone rang; five webhooks arrived, each passing the token check. The call moved
+      through `queued → in-progress → call-disconnected → completed`. No decision was taken at
+      `call-disconnected`.
+- [x] On `completed`, the worker re-fetched the execution and found
+      `extracted_data["Decision"]` with `Approval` = `approve` (confidence 0.95),
+      `Identity Confirmed` = `yes` (0.95) and `Condition` as free text (0.9). Confidence
+      was numeric with a `confidence_label` of `High`.
+- [x] `context_details.recipient_data` echoed every variable, including
+      `approval_line_call_id`, and `telephony_data.to_number` matched the stored number
+      exactly.
+- [x] Audit trail: `voice.call_initiated → vote.recorded → request.approved →
+      voice.decision_accepted`. The request became `approved`, `evaluation.authorized: true`.
+- [x] Send test: 400 with the correct token, 401 without (see above).
+
+Not yet tested live (covered by mock tests only):
+
+- [ ] Spoken rejection, "not sure", and needs clarification.
+- [ ] Conditional approval: condition recorded, then resolved, then re-approval call.
+- [ ] No-answer, busy, voicemail.
+- [ ] A lost webhook recovered by reconciliation.
+- [ ] Two-approver and quorum policies by phone.
+- [ ] Any deployment other than the local API behind a quick tunnel.
 
 ## Local development without credentials
 
@@ -197,7 +287,8 @@ PostgreSQL regression test in `tests/integration/test_voice_review_regressions.p
 ## Operating notes and limitations
 
 - **One intended call per approver.** Re-dialling is an explicit operator action
-  (`{"redial_unanswered": true}`), bounded by `VOICE_MAX_CALL_GENERATIONS`. There's no
+  (`{"redial_unanswered": true}`), bounded by `VOICE_MAX_CALL_GENERATIONS` (default 3
+  attempts per approver per request, the first call included). There's no
   escalation chain and no clarification call-back.
 - **Exactly-once phone calls are not possible.** The external call can't be part of a
   database transaction. The design guarantees durable jobs, no automatic re-dial after

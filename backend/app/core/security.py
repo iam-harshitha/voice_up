@@ -20,6 +20,8 @@ class Scope(StrEnum):
     VOTES_WRITE = "votes:write"
     VOICE_CALLS_CREATE = "voice:calls:create"
     VOICE_CALLS_READ = "voice:calls:read"
+    AUDIT_READ = "audit:read"
+    CONDITIONS_RESOLVE = "conditions:resolve"
 
 
 ALL_SCOPES: frozenset[str] = frozenset(scope.value for scope in Scope)

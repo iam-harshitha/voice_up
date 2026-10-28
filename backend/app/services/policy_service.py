@@ -1,6 +1,8 @@
 """Approvers and approval policies, always scoped to the caller's organization."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass, fields
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -9,8 +11,20 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.errors import BusinessRuleError, NotFoundError
 from app.db.models import ApprovalPolicy, Approver, PolicyApprover
 from app.db.session import transaction
-from app.domain.approval_rules import validate_required_approvals
+from app.domain.approval_rules import (
+    MAX_BACKUP_APPROVERS,
+    MAX_PRIMARY_APPROVERS,
+    ApprovalMode,
+    InvalidPolicyError,
+    PolicyRules,
+    Seat,
+    VetoMode,
+    validate_required_approvals,
+    validate_rules,
+)
 from app.schemas.policy import ApproverCreate, ApproverUpdate, PolicyCreate, PolicyUpdate
+from app.services import audit_service
+from app.services.audit_service import AuditEventType
 
 POLICY_INVALID = "approval_policy_invalid"
 
@@ -78,24 +92,31 @@ def update_approver(
 # --- Policies ----------------------------------------------------------------------------
 
 
-def _resolve_assignment(
-    session: Session,
-    organization_id: UUID,
-    required_approvals: int,
-    approver_ids: Sequence[UUID],
-) -> list[Approver]:
-    """Validate an approver assignment and return the approvers in the given order."""
-    validate_required_approvals(required_approvals)
-    if len(set(approver_ids)) != len(approver_ids):
-        raise BusinessRuleError("Assigned approvers must be distinct.", code=POLICY_INVALID)
-    if len(approver_ids) != required_approvals:
-        expected = (
-            "exactly one authorized approver"
-            if required_approvals == 1
-            else "exactly two distinct authorized approvers"
-        )
-        raise BusinessRuleError(f"The policy must have {expected}.", code=POLICY_INVALID)
+@dataclass(frozen=True)
+class PolicyConfig:
+    """Every authorization-relevant policy setting, validated as one unit."""
 
+    approval_mode: str
+    required_approvals: int
+    approver_ids: tuple[UUID, ...]
+    veto_mode: str
+    veto_approver_ids: tuple[UUID, ...]
+    backup_approver_ids: tuple[UUID, ...]
+    decision_deadline_seconds: int | None
+    escalation_after_seconds: int | None
+    max_escalations: int
+
+
+RULE_FIELDS = frozenset(f.name for f in fields(PolicyConfig))
+
+
+def _invalid(message: str) -> BusinessRuleError:
+    return BusinessRuleError(message, code=POLICY_INVALID)
+
+
+def _load_active(
+    session: Session, organization_id: UUID, approver_ids: Sequence[UUID]
+) -> dict[UUID, Approver]:
     # FOR SHARE: an approver cannot be deactivated while it is being assigned.
     found = {
         approver.id: approver
@@ -109,17 +130,131 @@ def _resolve_assignment(
         # Approvers of other organizations are reported exactly like missing ones.
         approver = found.get(approver_id)
         if approver is None:
-            raise BusinessRuleError(f"Approver {approver_id} was not found.", code=POLICY_INVALID)
+            raise _invalid(f"Approver {approver_id} was not found.")
         if not approver.is_active:
-            raise BusinessRuleError(f"Approver {approver_id} is inactive.", code=POLICY_INVALID)
-    return [found[approver_id] for approver_id in approver_ids]
+            raise _invalid(f"Approver {approver_id} is inactive.")
+    return found
 
 
-def _links(organization_id: UUID, approvers: Sequence[Approver]) -> list[PolicyApprover]:
-    return [
-        PolicyApprover(approver_id=approver.id, organization_id=organization_id, position=index)
-        for index, approver in enumerate(approvers)
+def _validate_config(
+    session: Session, organization_id: UUID, config: PolicyConfig
+) -> tuple[list[Approver], list[Approver]]:
+    """Validate the whole configuration; return (primaries, backups) in order."""
+    primaries, backups = list(config.approver_ids), list(config.backup_approver_ids)
+    validate_required_approvals(config.required_approvals)
+    if len(set(primaries)) != len(primaries):
+        raise _invalid("Assigned approvers must be distinct.")
+    if config.approval_mode == ApprovalMode.UNANIMOUS and len(primaries) != (
+        config.required_approvals
+    ):
+        expected = (
+            "exactly one authorized approver"
+            if config.required_approvals == 1
+            else "exactly two distinct authorized approvers"
+        )
+        raise _invalid(f"The policy must have {expected}.")
+    if config.approval_mode == ApprovalMode.QUORUM and not (
+        config.required_approvals <= len(primaries) <= MAX_PRIMARY_APPROVERS
+    ):
+        raise _invalid(
+            f"A quorum policy needs between {config.required_approvals} and "
+            f"{MAX_PRIMARY_APPROVERS} primary approvers."
+        )
+    if len(set(config.veto_approver_ids)) != len(config.veto_approver_ids) or not set(
+        config.veto_approver_ids
+    ) <= set(primaries):
+        raise _invalid("Veto holders must be distinct primary approvers of this policy.")
+    try:
+        validate_rules(
+            PolicyRules(
+                ApprovalMode(config.approval_mode),
+                config.required_approvals,
+                VetoMode(config.veto_mode),
+                tuple(Seat(a, a in config.veto_approver_ids) for a in primaries),
+            )
+        )
+    except (InvalidPolicyError, ValueError) as exc:
+        raise _invalid(f"Invalid policy rules: {exc}.") from exc
+
+    if len(set(backups)) != len(backups):
+        raise _invalid("Backup approvers must be distinct.")
+    if set(backups) & set(primaries):
+        raise _invalid("An approver cannot be both a primary and a backup.")
+    if len(backups) > MAX_BACKUP_APPROVERS:
+        raise _invalid(f"At most {MAX_BACKUP_APPROVERS} backup approvers.")
+    if config.escalation_after_seconds is None:
+        if config.max_escalations:
+            raise _invalid("max_escalations requires escalation_after_seconds.")
+    else:
+        if not backups:
+            raise _invalid("Escalation requires at least one backup approver.")
+        if not 1 <= config.max_escalations <= len(backups):
+            raise _invalid("max_escalations must be between 1 and the number of backups.")
+        if (
+            config.decision_deadline_seconds is not None
+            and config.escalation_after_seconds >= config.decision_deadline_seconds
+        ):
+            raise _invalid("Escalation must start before the decision deadline.")
+
+    found = _load_active(session, organization_id, primaries + backups)
+    return [found[a] for a in primaries], [found[a] for a in backups]
+
+
+def _links(
+    organization_id: UUID, config: PolicyConfig, primaries: list[Approver], backups: list[Approver]
+) -> list[PolicyApprover]:
+    links = [
+        PolicyApprover(
+            approver_id=approver.id,
+            organization_id=organization_id,
+            position=index,
+            role="primary",
+            can_veto=approver.id in config.veto_approver_ids,
+        )
+        for index, approver in enumerate(primaries)
     ]
+    links += [
+        PolicyApprover(
+            approver_id=approver.id,
+            organization_id=organization_id,
+            position=len(primaries) + index,
+            role="backup",
+            can_veto=False,
+        )
+        for index, approver in enumerate(backups)
+    ]
+    return links
+
+
+def _config_of(policy: ApprovalPolicy) -> PolicyConfig:
+    return PolicyConfig(
+        approval_mode=policy.approval_mode,
+        required_approvals=policy.required_approvals,
+        approver_ids=tuple(link.approver_id for link in policy.primary_links),
+        veto_mode=policy.veto_mode,
+        veto_approver_ids=tuple(policy.veto_approver_ids),
+        backup_approver_ids=tuple(link.approver_id for link in policy.backup_links),
+        decision_deadline_seconds=policy.decision_deadline_seconds,
+        escalation_after_seconds=policy.escalation_after_seconds,
+        max_escalations=policy.max_escalations,
+    )
+
+
+def _config_data(config: PolicyConfig) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for name in RULE_FIELDS:
+        value = getattr(config, name)
+        data[name] = [str(v) for v in value] if isinstance(value, tuple) else value
+    return data
+
+
+def _apply_config(policy: ApprovalPolicy, config: PolicyConfig) -> None:
+    policy.approval_mode = config.approval_mode
+    policy.required_approvals = config.required_approvals
+    policy.veto_mode = config.veto_mode
+    policy.decision_deadline_seconds = config.decision_deadline_seconds
+    policy.escalation_after_seconds = config.escalation_after_seconds
+    policy.max_escalations = config.max_escalations
 
 
 def _policy_query(organization_id: UUID, policy_id: UUID):
@@ -143,20 +278,56 @@ def get_policy(
     return policy
 
 
-def create_policy(session: Session, organization_id: UUID, data: PolicyCreate) -> ApprovalPolicy:
+def _default_max_escalations(escalation_after: int | None, backups: Sequence[UUID]) -> int:
+    return len(backups) if escalation_after is not None else 0
+
+
+def _actor(actor_api_key_id: UUID | None) -> str | None:
+    return str(actor_api_key_id) if actor_api_key_id else None
+
+
+def create_policy(
+    session: Session,
+    organization_id: UUID,
+    data: PolicyCreate,
+    *,
+    actor_api_key_id: UUID | None = None,
+) -> ApprovalPolicy:
+    config = PolicyConfig(
+        approval_mode=data.approval_mode,
+        required_approvals=data.required_approvals,
+        approver_ids=tuple(data.approver_ids),
+        veto_mode=data.veto_mode,
+        veto_approver_ids=tuple(data.veto_approver_ids),
+        backup_approver_ids=tuple(data.backup_approver_ids),
+        decision_deadline_seconds=data.decision_deadline_seconds,
+        escalation_after_seconds=data.escalation_after_seconds,
+        max_escalations=(
+            data.max_escalations
+            if data.max_escalations is not None
+            else _default_max_escalations(data.escalation_after_seconds, data.backup_approver_ids)
+        ),
+    )
     with transaction(session):
-        approvers = _resolve_assignment(
-            session, organization_id, data.required_approvals, data.approver_ids
-        )
+        primaries, backups = _validate_config(session, organization_id, config)
         policy = ApprovalPolicy(
-            organization_id=organization_id,
-            name=data.name,
-            description=data.description,
-            required_approvals=data.required_approvals,
+            organization_id=organization_id, name=data.name, description=data.description
         )
-        policy.approver_links = _links(organization_id, approvers)
+        _apply_config(policy, config)
+        policy.approver_links = _links(organization_id, config, primaries, backups)
         session.add(policy)
         session.flush()
+        audit_service.record_event(
+            session,
+            organization_id=organization_id,
+            policy_id=policy.id,
+            event_type=AuditEventType.POLICY_CREATED,
+            data={
+                "version": policy.version,
+                "actor_api_key_id": _actor(actor_api_key_id),
+                **_config_data(config),
+            },
+        )
         policy_id = policy.id
     session.expire(policy)
     return get_policy(session, organization_id, policy_id)
@@ -186,41 +357,68 @@ def list_policies(
 
 
 def update_policy(
-    session: Session, organization_id: UUID, policy_id: UUID, data: PolicyUpdate
+    session: Session,
+    organization_id: UUID,
+    policy_id: UUID,
+    data: PolicyUpdate,
+    *,
+    actor_api_key_id: UUID | None = None,
 ) -> ApprovalPolicy:
     """Apply changes and bump the version if anything changed.
 
-    Existing requests are unaffected: they carry their own policy snapshot.
+    The merged configuration is validated as a whole. Existing requests are unaffected:
+    they carry their own policy snapshot.
     """
-    fields = data.model_fields_set
+    supplied = data.model_fields_set
     with transaction(session):
         policy = get_policy(session, organization_id, policy_id, lock="update")
-        changed = False
+        changed: list[str] = []
 
         for field in ("name", "description", "is_active"):
-            if field in fields and getattr(policy, field) != getattr(data, field):
+            if field in supplied and getattr(policy, field) != getattr(data, field):
                 setattr(policy, field, getattr(data, field))
-                changed = True
+                changed.append(field)
 
-        if fields & {"required_approvals", "approver_ids"}:
-            current_ids = [link.approver_id for link in policy.approver_links]
-            required = (
-                data.required_approvals
-                if data.required_approvals is not None
-                else policy.required_approvals
-            )
-            approver_ids = data.approver_ids if data.approver_ids is not None else current_ids
-            if required != policy.required_approvals or approver_ids != current_ids:
-                approvers = _resolve_assignment(session, organization_id, required, approver_ids)
-                policy.required_approvals = required
+        current = _config_of(policy)
+        if supplied & RULE_FIELDS:
+            merged: dict[str, Any] = {}
+            for name in RULE_FIELDS:
+                if name in supplied:
+                    value = getattr(data, name)
+                    merged[name] = tuple(value) if isinstance(value, list) else value
+                else:
+                    merged[name] = getattr(current, name)
+            if "max_escalations" not in supplied and (
+                supplied & {"escalation_after_seconds", "backup_approver_ids"}
+            ):
+                merged["max_escalations"] = _default_max_escalations(
+                    merged["escalation_after_seconds"], merged["backup_approver_ids"]
+                )
+            new = PolicyConfig(**merged)
+            if new != current:
+                primaries, backups = _validate_config(session, organization_id, new)
+                _apply_config(policy, new)
                 # Remove old links before inserting new ones so reordering cannot trip the
                 # (policy_id, position) unique constraint mid-flush.
                 policy.approver_links.clear()
                 session.flush()
-                policy.approver_links.extend(_links(organization_id, approvers))
-                changed = True
+                policy.approver_links.extend(_links(organization_id, new, primaries, backups))
+                changed += sorted(n for n in RULE_FIELDS if getattr(new, n) != getattr(current, n))
+                current = new
 
         if changed:
             policy.version += 1
+            audit_service.record_event(
+                session,
+                organization_id=organization_id,
+                policy_id=policy.id,
+                event_type=AuditEventType.POLICY_UPDATED,
+                data={
+                    "version": policy.version,
+                    "changed_fields": changed,
+                    "actor_api_key_id": _actor(actor_api_key_id),
+                    **_config_data(current),
+                },
+            )
     session.expire(policy)
     return get_policy(session, organization_id, policy_id)

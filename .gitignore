@@ -15,6 +15,7 @@ venv/
 # Secrets and local configuration
 .env
 *.env
+.env.*
 !.env.example
 
 # Editors / OS
@@ -25,3 +26,15 @@ Thumbs.db
 
 # Local mock voice state (development only)
 .mock_voice/
+
+# Demo agent execution records (simulated deployments)
+.demo_runs/
+
+# Local demo process state and logs (scripts/start-demo.ps1)
+.demo/
+
+# Dashboard (frontend) build output and dependencies
+node_modules/
+frontend/dist/
+frontend/coverage/
+*.tsbuildinfo

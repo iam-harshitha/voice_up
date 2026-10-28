@@ -25,6 +25,7 @@ class NoDecisionReason(StrEnum):
     UNCERTAIN = "uncertain"
     NEEDS_CLARIFICATION = "needs_clarification"
     LOW_CONFIDENCE = "low_confidence"
+    CONDITION_MISSING = "condition_missing"
 
 
 @dataclass(frozen=True)
@@ -44,10 +45,16 @@ class Interpretation:
     vote: VoteChoice | None
     reason: NoDecisionReason | None
     confidence: float | None
+    # Set only for a valid conditional approval: what the approver required.
+    condition: str | None = None
 
     @property
     def is_vote(self) -> bool:
         return self.vote is not None
+
+    @property
+    def is_condition(self) -> bool:
+        return self.condition is not None
 
 
 def _normalize(value: str | None) -> str | None:
@@ -70,13 +77,12 @@ def interpret(execution: ProviderExecution, expected: ExpectedCall) -> Interpret
         return _no(NoDecisionReason.CALL_NOT_COMPLETED)
 
     # The execution must be the exact call we placed, to the person we placed it to.
+    # The echoed correlation ID is required: a missing one fails closed. The number is
+    # checked only when present, because Bolna's PII masking nulls phone numbers.
     if (
         execution.provider_call_id != expected.provider_call_id
         or execution.agent_id != expected.agent_id
-        or (
-            execution.correlation_id is not None
-            and execution.correlation_id != expected.internal_call_id
-        )
+        or execution.correlation_id != expected.internal_call_id
         or (
             execution.to_number is not None
             and expected.recipient_phone_number is not None
@@ -112,6 +118,11 @@ def interpret(execution: ProviderExecution, expected: ExpectedCall) -> Interpret
         return _no(NoDecisionReason.NEEDS_CLARIFICATION, candidate, decision.confidence)
     if not _confident(decision, expected.min_confidence):
         return _no(NoDecisionReason.LOW_CONFIDENCE, candidate, decision.confidence)
+    if candidate is DecisionChoice.CONDITIONAL_APPROVE:
+        # Never a vote. Without the stated condition there is nothing to record.
+        if not execution.condition_text:
+            return _no(NoDecisionReason.CONDITION_MISSING, candidate, decision.confidence)
+        return Interpretation(candidate, None, None, decision.confidence, execution.condition_text)
 
     vote = VoteChoice.APPROVE if candidate is DecisionChoice.APPROVE else VoteChoice.REJECT
     return Interpretation(candidate, vote, None, decision.confidence)

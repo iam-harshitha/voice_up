@@ -263,5 +263,12 @@ def test_forged_terminal_events_do_not_amplify_into_provider_api_calls(
 def test_lease_must_comfortably_exceed_provider_timeout():
     db = "postgresql+psycopg://u:p@127.0.0.1:1/approval_line_test"
     with pytest.raises(ValidationError, match="VOICE_JOB_LEASE_SECONDS"):
-        Settings(database_url=db, voice_job_lease_seconds=30, voice_http_timeout_seconds=20)
-    Settings(database_url=db, voice_job_lease_seconds=120, voice_http_timeout_seconds=10)
+        Settings(
+            _env_file=None,
+            database_url=db,
+            voice_job_lease_seconds=30,
+            voice_http_timeout_seconds=20,
+        )
+    Settings(
+        _env_file=None, database_url=db, voice_job_lease_seconds=120, voice_http_timeout_seconds=10
+    )

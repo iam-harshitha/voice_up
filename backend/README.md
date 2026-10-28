@@ -1,4 +1,4 @@
-# Approval Line — backend (Chunk 1)
+# Approval Line — backend
 
 Approval Line lets an AI agent ask humans for authorization before it takes a
 consequential action. An organization configures a policy that needs one or two
@@ -9,7 +9,25 @@ the result over a REST API.
 Chunk 2 adds voice approvals: Approval Line calls each approver through Bolna, and
 turns a verified, explicit spoken decision into a vote through the same approval
 service. See **[docs/voice-bolna.md](docs/voice-bolna.md)** for the design, the verified
-Bolna contract, setup and limitations. The dashboard and MCP come in later chunks.
+Bolna contract, setup and limitations.
+
+Chunk 3 adds quorum and veto policies, backup approvers with durable time-based
+escalation, decision deadlines, conditional approvals that can never authorize by
+themselves, policy audit events, and an audit timeline API. The exact semantics,
+states, endpoints and a walkthrough are in **[docs/policies.md](docs/policies.md)**.
+
+Chunk 5 hardens and packages it: idempotent request creation, production fail-closed
+configuration, failure-injection tests, a safe `demo-seed` command, one-command local
+startup (`../scripts/start-demo.ps1`), CI, deployment artifacts and measured latency. See
+**[docs/demo-runbook.md](docs/demo-runbook.md)**, **[docs/deployment.md](docs/deployment.md)**,
+**[docs/security.md](docs/security.md)**, **[docs/performance.md](docs/performance.md)** and
+**[docs/demo-pitch.md](docs/demo-pitch.md)**.
+
+Chunk 4 adds the operator dashboard (`../frontend`, with browser sign-in via HttpOnly
+session cookies and CSRF protection), an MCP server that exposes approval tools to
+agents, and a demo agent that only performs a simulated deployment after an explicit,
+matching authorization. See **[docs/dashboard-mcp.md](docs/dashboard-mcp.md)**, which
+also has the full end-to-end demo procedure.
 
 ## Requirements
 
@@ -123,6 +141,8 @@ Send it as the `X-API-Key` header.
 | `votes:write` | record a vote (trusted integration only, see below) |
 | `voice:calls:create` | schedule approval phone calls for a request |
 | `voice:calls:read` | read a request's call status and outcomes |
+| `conditions:resolve` | resolve a conditional approval (never approves by itself) |
+| `audit:read` | read request and policy audit timelines |
 
 An agent key should have only `requests:create,requests:read`. It must never hold
 `votes:write` or `policies:write`.
@@ -139,8 +159,15 @@ An agent key should have only `requests:create,requests:read`. It must never hol
 | `POST /policies` | policies:write | `required_approvals` 1 or 2 + exactly that many distinct active approvers |
 | `GET /policies`, `GET /policies/{id}` | policies:read | `?is_active=` filter |
 | `PATCH /policies/{id}` | policies:write | any change bumps `version` |
-| `POST /requests` | requests:create | `policy_id`, `action`, `summary`, `context` (object, ≤16 KB) |
-| `GET /requests`, `GET /requests/{id}` | requests:read | `?status=pending\|approved\|rejected` |
+| `POST /requests` | requests:create | `policy_id`, `action`, `summary`, `context` (object, ≤16 KB); optional `Idempotency-Key` header (8–128 chars): a retry returns the original (200, `Idempotent-Replayed: true`), the same key with a different payload returns 422 `idempotency_key_reused` |
+| `GET /requests`, `GET /requests/{id}` | requests:read | `?status=pending\|approved\|rejected\|expired`, `?include_evaluation=true`; detail includes `evaluation`, `expires_at`, snapshot `policy` and named `approvers` |
+| `GET /requests/stats` | requests:read | exact counts by status, plus engine-derived condition/re-approval/deadline counts (bounded; see `evaluation_complete`) |
+| `GET /audit-events/recent` | audit:read | newest organization events, `?limit≤50` |
+| `POST /auth/login`, `GET /auth/session`, `POST /auth/logout` | dashboard credentials | browser sign-in (HttpOnly cookie + `X-CSRF-Token`); see docs/dashboard-mcp.md |
+| `GET /requests/{id}/conditions`, `GET /requests/{id}/escalations` | requests:read | conditions and escalation steps |
+| `POST /requests/{id}/conditions` | votes:write | record a conditional approval (trusted integration) |
+| `POST /requests/{id}/conditions/{cid}/resolve` | conditions:resolve | `satisfied` \| `not_satisfied`, `note`, optional `evidence_reference` |
+| `GET /requests/{id}/audit-events`, `GET /policies/{id}/audit-events` | audit:read | `?after=<sequence>&limit≤200` |
 | `POST /requests/{id}/votes` | votes:write | `approver_id`, `vote` = approve\|reject; 201 new, 200 identical repeat |
 | `POST /requests/{id}/voice-calls` | voice:calls:create | one call per snapshotted approver; 201 new, 200 already scheduled; optional `{"redial_unanswered": true}` |
 | `GET /requests/{id}/voice-calls` | voice:calls:read | call status, attempts, decision status, outcome (no phone numbers) |
@@ -174,8 +201,10 @@ found in your organization, 409 conflicting or late vote, 422 schema validation,
 
 ## Voice worker
 
-Calls are placed and provider events are processed by a separate worker process. It
-uses a PostgreSQL job queue; run as many workers as you like.
+Calls are placed, provider events processed, deadlines enforced and escalation rounds
+run by a separate worker process. It uses a PostgreSQL job queue; run as many workers
+as you like. With `VOICE_PROVIDER=disabled` it still runs deadline and escalation jobs.
+After a restart, unfinished jobs are picked up again when their lease expires.
 
 ```powershell
 python -m app.workers.voice_worker            # long-running; Ctrl+C stops after the current job
@@ -220,8 +249,13 @@ pytest tests/unit                       # pure policy engine, no DB
 pytest -m "not integration"             # everything that needs no DB
 pytest tests/integration/test_votes.py::TestConcurrency   # one class
 pytest -k conflicting_duplicate         # by name
+pytest tests/agents                     # MCP server, REST client, demo-agent gate (no DB)
+pytest tests/integration/test_chunk4_e2e.py   # mock-backed end-to-end (DB)
 ruff check . ; ruff format --check .
 ```
+
+Frontend checks run from `../frontend`: `npm run typecheck`, `npm test`, `npm run build`,
+`npm run check:bundle`.
 
 Integration tests **drop and rebuild the schema** of `TEST_DATABASE_URL` using the
 Alembic migrations. They refuse to run unless that database's name contains `test` and
@@ -236,7 +270,10 @@ app/services/                 business operations and transaction boundaries
 app/api/                      FastAPI routes; dependencies.py has auth/tenant/scope layers
 app/db/models/                SQLAlchemy models; migrations/ holds the Alembic history
 app/core/                     settings, API-key crypto, error format, JSON logging
-app/cli.py                    org / API-key bootstrap
+app/cli.py                    org / API-key / dashboard-user bootstrap, demo-seed, voice-simulate
+scripts/measure_latency.py    bounded latency measurements (test database only)
+approval_line_agents/         MCP server, strict REST client, demo agent (talk to the API over HTTP)
+../frontend/                  React dashboard
 ```
 
 ## Design notes and assumptions
@@ -269,5 +306,5 @@ app/cli.py                    org / API-key bootstrap
 - Stronger approver verification for voice (e.g. a spoken PIN) before production use.
 - Separate migration-owner and runtime database roles, so the runtime role can only
   `INSERT`/`SELECT` audit events.
-- An audit-event read endpoint for the dashboard timeline (order by `sequence`).
 - Key rotation metadata (last used, expiry) on `api_keys`.
+- Per-IP sign-in rate limiting, MFA/SSO, idle session timeout for the dashboard.

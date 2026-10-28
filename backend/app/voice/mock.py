@@ -124,6 +124,7 @@ class MockVoiceProvider:
         identity: str | None = "yes",
         confidence: float | None = 0.95,
         identity_confidence: float | None = 0.95,
+        condition: str | None = None,
         voicemail: bool = False,
         extracted_data: Any = None,
         status: str = "completed",
@@ -144,6 +145,13 @@ class MockVoiceProvider:
                     "objective": identity,
                     "confidence": identity_confidence,
                     "subjective": None,
+                    "validation": None,
+                }
+            if condition is not None:
+                category[self._settings.bolna_condition_extraction] = {
+                    "subjective": condition,
+                    "objective": None,
+                    "confidence": confidence,
                     "validation": None,
                 }
             extracted_data = {self._settings.bolna_extraction_category: category}

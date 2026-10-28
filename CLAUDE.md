@@ -5,13 +5,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Approval Line: human authorization for AI agents. An agent submits an approval request.
-A one- or two-person policy decides it from approvers' votes, and the agent reads back
-`pending` / `approved` / `rejected`. Development is in chunks:
+An organization policy (unanimous or quorum, veto modes, backups, deadline) decides it
+from approvers' votes, and the agent reads back `pending` / `approved` / `rejected` /
+`expired` plus a structured `evaluation`. Development is in chunks:
 
 - **Chunk 1 (done):** the core approval backend in `backend/`.
-- **Chunk 2 (done, mock-verified only):** Bolna voice calls to approvers
-  (`backend/docs/voice-bolna.md`). No live Bolna call has been tested yet.
-- **Later:** a React dashboard with a decision timeline and call evidence, and MCP.
+- **Chunk 2 (done):** Bolna voice calls to approvers (`backend/docs/voice-bolna.md`).
+  One live approval call succeeded on 2026-10-28; other paths are mock-verified only.
+- **Chunk 3 (done):** quorum/veto, conditional approvals, deadlines, escalation to
+  backups, policy audit events, audit timeline API (`backend/docs/policies.md`).
+- **Chunk 4 (done, mock-verified):** React dashboard (`frontend/`) with cookie sessions +
+  CSRF, MCP server and demo agent (`backend/approval_line_agents/`)
+  (`backend/docs/dashboard-mcp.md`).
+- **Chunk 5 (done, mock-verified):** hardening and demo readiness: `Idempotency-Key` on
+  `POST /requests` (migration 0005), production fail-closed config, failure-injection
+  tests, `demo-seed`, `scripts/start-demo.ps1` / `stop-demo.ps1`, CI, deployment
+  artifacts (`backend/docs/deployment.md`, `security.md`, `demo-runbook.md`).
 
 Don't build later-chunk features while working on an earlier one.
 
@@ -33,8 +42,15 @@ python -m app.cli create-org --name X --key "agent=requests:create,requests:read
 pytest                          # all tests; integration tests use TEST_DATABASE_URL
 pytest tests/integration/test_votes.py::TestConcurrency::test_concurrent_duplicate_votes_record_once
 pytest -m "not integration"     # no database needed
-python -m app.workers.voice_worker --once     # process voice jobs (needs VOICE_PROVIDER)
+python -m app.workers.voice_worker --once     # voice jobs + deadline/escalation jobs
 python -m app.cli voice-simulate --call-id <id> --decision approve   # mock + dev only
+python -m app.cli create-dashboard-user --org-id <id> --email x@example.com --name X --scopes "..."
+python -m approval_line_agents.mcp_server    # needs APPROVAL_LINE_API_URL / _API_KEY
+python -m approval_line_agents.demo --policy-id <id>
+python -m app.cli demo-seed --org-id <id> --yes [--issue-agent-key]   # dev only, additive
+python scripts/measure_latency.py            # test DB only; never while pytest runs
+# repo root: .\scripts\start-demo.ps1 -Migrate ; .\scripts\stop-demo.ps1
+# frontend (from frontend/): npm ci; npm run dev | typecheck | test | build | check:bundle
 ruff check . ; ruff format .
 ```
 
@@ -58,14 +74,30 @@ Invariants that span several files:
 - **Database-level tenant isolation:** child tables carry `organization_id` and use
   composite foreign keys `(parent_id, organization_id)` → `UNIQUE(id, organization_id)`
   on the parent. New tenant-owned tables should follow this pattern.
-- **Policy snapshot:** `approval_requests.policy_snapshot` freezes `required_approvals`
-  and `approver_ids` at creation. Vote validation uses the snapshot, never the live
-  policy. Policy edits bump `version`.
-- **Vote transaction** (`services/approval_service.cast_vote`): lock the request
-  `FOR UPDATE`, insert the vote, record audit events, evaluate, and update the status,
-  all in one transaction via `db/session.transaction()`. Order of checks: 404 →
-  approver in snapshot (400) → identical repeat returns the existing result (200) /
-  conflicting vote (409) → already decided (409) → approver inactive (400).
+- **Policy snapshot:** `policy_snapshot` (v2; v1 still readable via
+  `domain/snapshot.read_snapshot`) plus the trigger-protected `request_approvers` table
+  freeze the rules at creation. Votes, conditions and escalation steps have FKs into
+  `request_approvers`. Never evaluate from the live policy. Policy edits bump `version`
+  and write `policy.*` audit events (with `policy_id`, not `request_id`).
+- **Seats:** each primary is a seat; a backup assigned by an `escalation_steps` row may
+  decide that seat. `UNIQUE(request_id, seat_approver_id)` = first valid vote wins.
+- **Decision transactions** (`services/approval_service`): `record_vote`,
+  `record_condition`, `resolve_condition` and `expire_if_due` all lock the request
+  `FOR UPDATE`, re-evaluate with `evaluate()` and apply transitions through
+  `_apply_evaluation` (status + final audit event + lapsing conditions), in one
+  transaction. Errors are raised before any write. Vote check order: 404 → seat
+  authorized (400) → identical repeat (200) / conflicting (409) → expired/decided (409)
+  → seat decided by another (409) → open condition blocks approve (409) → a satisfied
+  condition stated by another holder of the seat blocks approve (409
+  `reapproval_required`) → inactive (400). Only one holder of a seat may hold
+  conditions at a time (`seat_condition_pending`).
+- **Conditions never approve:** an open condition, or a satisfied one whose approver has
+  not re-approved, blocks approval. Resolution needs `conditions:resolve`.
+- **Request jobs** (`expire_request`, `escalate_request` in `voice_jobs`) run their
+  business change and their own job completion/rescheduling in ONE transaction (lock
+  order: job row, then request). The worker runs them even with voice disabled.
+- All call creation goes through `voice_service.create_call` (generation limits,
+  duplicate-call guard), used by scheduling, escalation and re-approval.
 - **Audit events:** insert-only through `services/audit_service.record_event`, in the
   caller's transaction. A DB trigger blocks UPDATE/DELETE. Order timelines by
   `sequence`, not `created_at`, because events in one transaction can share a timestamp.
@@ -109,4 +141,23 @@ Voice subsystem invariants (see `backend/docs/voice-bolna.md`):
   exception text.
 - Use only fictional phone numbers in tests and docs (`+141555501xx`).
 - When a model changes, update or add a migration, then run `alembic check` and the
-  full suite.
+  full suite. `alembic check` does NOT see changed CHECK constraints or triggers; write
+  those by hand (see migration 0003's `_replace_check`) and cover them with tests.
+
+Chunk 4 invariants (see `backend/docs/dashboard-mcp.md`):
+
+- The browser never holds an API key. Dashboard users sign in (scrypt hashes) and get an
+  HttpOnly `al_session` cookie; non-GET cookie requests need `X-CSRF-Token`. Each user is
+  backed by an internal API key (plaintext discarded) so scopes and attribution reuse the
+  existing chain. `X-API-Key` always takes precedence over a cookie.
+- Dashboard users can never hold `votes:write`; the UI has no voting control.
+- The dashboard, MCP server and demo agent never compute decisions. Show/act on
+  authorization only when `status == "approved"` and `evaluation.authorized is true`.
+- `approval_line_agents` talks to the API over HTTP only (never the DB). Its client parses
+  strictly and raises on missing/contradictory authorization fields; tool errors are never
+  successes. Request creation is retried only with the same `Idempotency-Key`
+  (never without one); the server replays the original request.
+- Tests build `Settings(_env_file=None, ...)`: the developer's `.env` must never change
+  test behaviour. Never run two pytest processes (or the latency script) at once: they
+  share the test database.
+- MCP stdio: stdout is protocol only; log to stderr; never put the key in results/errors.

@@ -2,12 +2,14 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     approvers,
+    auth,
     health,
     policies,
     requests,
     voice_calls,
     voice_webhooks,
     votes,
+    workflow,
 )
 from app.schemas.common import ErrorResponse
 
@@ -22,3 +24,5 @@ api_router.include_router(requests.router, responses=_ERRORS)
 api_router.include_router(votes.router, responses=_ERRORS)
 api_router.include_router(voice_calls.router, responses=_ERRORS)
 api_router.include_router(voice_webhooks.router)
+api_router.include_router(workflow.router, responses=_ERRORS)
+api_router.include_router(auth.router, responses=_ERRORS)

@@ -9,9 +9,15 @@ Examples:
     python -m app.cli create-key --org-id <uuid> --name voter --scopes votes:write
     python -m app.cli list-keys --org-id <uuid>
     python -m app.cli revoke-key --key-id <uuid>
+    python -m app.cli create-dashboard-user --org-id <uuid> --email ops@example.com \\
+        --name "Ops Lead" --scopes "requests:read,requests:create,policies:read,..."
+    python -m app.cli disable-dashboard-user --email ops@example.com
+    python -m app.cli demo-seed --org-id <uuid> --yes [--issue-agent-key]
 """
 
 import argparse
+import getpass
+import os
 import sys
 from collections.abc import Sequence
 from uuid import UUID
@@ -23,7 +29,7 @@ from app.core.config import get_settings
 from app.core.errors import AppError
 from app.core.security import AGENT_SCOPES, ALL_SCOPES
 from app.db.session import build_engine, build_session_factory, transaction
-from app.services import api_key_service
+from app.services import api_key_service, dashboard_auth_service
 from app.services.api_key_service import IssuedApiKey
 
 _SCOPE_HELP = (
@@ -73,6 +79,50 @@ def _build_parser() -> argparse.ArgumentParser:
     revoke = commands.add_parser("revoke-key", help="Revoke a key immediately.")
     revoke.add_argument("--key-id", required=True, type=UUID)
 
+    dash = commands.add_parser(
+        "create-dashboard-user",
+        help="Create a dashboard (browser) user with a password and scoped access.",
+        description=(
+            "The password is read from an interactive prompt, or from the environment "
+            "variable named by --password-env (never from the command line). votes:write "
+            "cannot be granted to dashboard users."
+        ),
+    )
+    dash.add_argument("--org-id", required=True, type=UUID)
+    dash.add_argument("--email", required=True)
+    dash.add_argument("--name", required=True, help="Display name.")
+    dash.add_argument("--scopes", required=True, help=_SCOPE_HELP)
+    dash.add_argument(
+        "--password-env",
+        metavar="VAR",
+        help="Read the password from this environment variable (for scripted setup).",
+    )
+
+    disable = commands.add_parser(
+        "disable-dashboard-user",
+        help="Deactivate a dashboard user and revoke its sessions and backing key.",
+    )
+    disable.add_argument("--email", required=True)
+
+    demo = commands.add_parser(
+        "demo-seed",
+        help="DEMO ONLY: add the demo approvers and policies to an existing organization.",
+        description=(
+            "Idempotent and additive: creates fictional approvers (555-01xx numbers) and two "
+            "demo policies in the given organization, reusing identical ones and refusing to "
+            "touch conflicting ones. Never creates requests or votes, never deletes anything. "
+            "Refused when APP_ENV=production. Requires --yes."
+        ),
+    )
+    demo.add_argument("--org-id", required=True, type=UUID)
+    demo.add_argument("--yes", action="store_true", help="Confirm the additive changes.")
+    demo.add_argument(
+        "--issue-agent-key",
+        action="store_true",
+        help="Also issue a 'demo-agent' key (requests:create,requests:read,audit:read,"
+        "policies:read), printed once. Skipped if an active one already exists.",
+    )
+
     simulate = commands.add_parser(
         "voice-simulate",
         help="DEVELOPMENT ONLY: finish a mock call and deliver its webhook to a running API.",
@@ -86,8 +136,12 @@ def _build_parser() -> argparse.ArgumentParser:
     simulate.add_argument(
         "--decision",
         default="approve",
-        help="Extracted decision: approve, reject, uncertain, needs_clarification, or none.",
+        help=(
+            "Extracted decision: approve, reject, uncertain, needs_clarification, "
+            "conditional_approve, or none."
+        ),
     )
+    simulate.add_argument("--condition", help="Stated condition (with conditional_approve).")
     simulate.add_argument("--identity", default="yes", help="Identity confirmed: yes/no/none.")
     simulate.add_argument("--confidence", type=float, default=0.95)
     simulate.add_argument(
@@ -128,6 +182,7 @@ def _voice_simulate(args: argparse.Namespace, settings) -> None:
             identity=optional(args.identity),
             confidence=args.confidence,
             identity_confidence=args.confidence,
+            condition=args.condition,
         )
     else:
         payload = mock.set_status(execution["id"], args.status)
@@ -140,6 +195,63 @@ def _voice_simulate(args: argparse.Namespace, settings) -> None:
     print(f"webhook delivered: HTTP {response.status_code} {response.text}")
     if response.status_code != 200:
         raise CliError("the API did not accept the simulated webhook")
+
+
+DEMO_AGENT_KEY = "demo-agent"
+DEMO_AGENT_SCOPES = "requests:create,requests:read,audit:read,policies:read"
+
+
+def _demo_seed(args: argparse.Namespace, settings, session) -> None:
+    from app.services import demo_seed_service
+
+    if settings.app_env == "production":
+        raise CliError("demo-seed is refused when APP_ENV=production")
+    if not args.yes:
+        raise CliError(
+            "demo-seed adds demo approvers and policies to organization "
+            f"{args.org_id}. Re-run with --yes to confirm."
+        )
+    try:
+        result = demo_seed_service.seed(session, args.org_id)
+    except demo_seed_service.DemoSeedError as exc:
+        raise CliError(str(exc)) from exc
+    print(f"Demo data in organization '{result.organization_name}' ({args.org_id}):")
+    for line in result.created:
+        print(f"  created  {line}")
+    for line in result.reused:
+        print(f"  reused   {line}")
+    for name, policy_id in result.policies.items():
+        print(f"  policy id  {policy_id}  {name}")
+    if args.issue_agent_key:
+        active = [
+            k
+            for k in api_key_service.list_api_keys(session, args.org_id)
+            if k.name == DEMO_AGENT_KEY and k.revoked_at is None
+        ]
+        session.rollback()
+        if active:
+            print(
+                f"  agent key '{DEMO_AGENT_KEY}' already active (id {active[0].id}); not reissued"
+            )
+        else:
+            with transaction(session):
+                key = api_key_service.issue_api_key(
+                    session, args.org_id, DEMO_AGENT_KEY, DEMO_AGENT_SCOPES
+                )
+            _print_issued(key)
+            _print_warning()
+
+
+def _read_password(args: argparse.Namespace) -> str:
+    if args.password_env:
+        value = os.environ.get(args.password_env)
+        if not value:
+            raise CliError(f"environment variable {args.password_env} is not set")
+        return value
+    first = getpass.getpass("Password (min 12 characters): ")
+    if first != getpass.getpass("Repeat password: "):
+        raise CliError("passwords do not match")
+    return first
 
 
 def _print_issued(key: IssuedApiKey) -> None:
@@ -182,6 +294,24 @@ def _run(args: argparse.Namespace) -> None:
             for key in api_key_service.list_api_keys(session, args.org_id):
                 state = f"revoked {key.revoked_at.isoformat()}" if key.revoked_at else "active"
                 print(f"{key.id}  {key.name:<24} {state:<34} {','.join(key.scopes)}")
+        elif args.command == "create-dashboard-user":
+            password = _read_password(args)
+            with transaction(session):
+                user = dashboard_auth_service.create_user(
+                    session,
+                    args.org_id,
+                    email=args.email,
+                    display_name=args.name,
+                    password=password,
+                    scopes=args.scopes,
+                )
+            print(f"Dashboard user '{user.email}' created (id {user.id})")
+        elif args.command == "disable-dashboard-user":
+            with transaction(session):
+                user = dashboard_auth_service.disable_user(session, args.email)
+            print(f"Dashboard user '{user.email}' disabled; sessions and backing key revoked")
+        elif args.command == "demo-seed":
+            _demo_seed(args, settings, session)
         elif args.command == "revoke-key":
             with transaction(session):
                 key = api_key_service.revoke_api_key(session, args.key_id)

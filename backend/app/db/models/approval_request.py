@@ -7,6 +7,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    SmallInteger,
     String,
     UniqueConstraint,
     func,
@@ -41,6 +42,19 @@ class ApprovalRequest(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
             ondelete="RESTRICT",
         ),
         Index("ix_approval_requests_organization_id_created_at", "organization_id", "created_at"),
+        Index("ix_approval_requests_status_expires_at", "status", "expires_at"),
+        # Idempotent creation: one request per (organization, client key).
+        CheckConstraint(
+            "(idempotency_key_hash IS NULL) = (idempotency_fingerprint IS NULL)",
+            name="idempotency_fields_together",
+        ),
+        Index(
+            "uq_approval_requests_organization_id_idempotency_key_hash",
+            "organization_id",
+            "idempotency_key_hash",
+            unique=True,
+            postgresql_where=text("idempotency_key_hash IS NOT NULL"),
+        ),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -59,6 +73,12 @@ class ApprovalRequest(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         default=utcnow, onupdate=utcnow, server_default=func.now()
     )
     decided_at: Mapped[datetime | None]
+    # Snapshotted deadline (created_at + policy deadline). Never caller-supplied.
+    expires_at: Mapped[datetime | None]
+    # Idempotency-Key support: SHA-256 of the client's key (the key itself is not stored)
+    # and of the canonical request payload, to detect a key reused for different content.
+    idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))
+    idempotency_fingerprint: Mapped[str | None] = mapped_column(String(64))
 
     votes: Mapped[list["ApprovalVote"]] = relationship(  # noqa: F821
         order_by="[ApprovalVote.created_at, ApprovalVote.id]", viewonly=True
@@ -70,4 +90,38 @@ class ApprovalRequest(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
 
     @property
     def authorized_approver_ids(self) -> list[uuid.UUID]:
+        """The primary approvers (seats) from the snapshot, in order."""
         return [uuid.UUID(value) for value in self.policy_snapshot["approver_ids"]]
+
+
+class RequestApprover(Base):
+    """Normalised, immutable copy of who may decide a request (primaries and backups).
+
+    Votes reference this table, so the database itself rejects a vote from anyone who was
+    not in the request's snapshot. A trigger (migration 0003) blocks UPDATE and DELETE.
+    """
+
+    __tablename__ = "request_approvers"
+    __table_args__ = (
+        CheckConstraint("role IN ('primary', 'backup')", name="role_valid"),
+        CheckConstraint("role = 'primary' OR NOT can_veto", name="only_primaries_veto"),
+        CheckConstraint("position >= 0", name="position_non_negative"),
+        UniqueConstraint("request_id", "position"),
+        ForeignKeyConstraint(
+            ["request_id", "organization_id"],
+            ["approval_requests.id", "approval_requests.organization_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["approver_id", "organization_id"],
+            ["approvers.id", "approvers.organization_id"],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    request_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    approver_id: Mapped[uuid.UUID] = mapped_column(primary_key=True, index=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(index=True)
+    role: Mapped[str] = mapped_column(String(16))
+    can_veto: Mapped[bool] = mapped_column(default=False)
+    position: Mapped[int] = mapped_column(SmallInteger)

@@ -93,13 +93,18 @@ class TestCrashRecovery:
     ):
         with pytest.raises(WorkerCrash):
             run_worker(provider=CrashingProvider(mock_provider))
-        alice = calls(voice_client, voice_tenant, scheduled)[0]
-        assert alice["status"] == "initiating"
+        # Both initiation jobs can share run_after, so either call may be the one that was
+        # being initiated when the worker died; follow that call, whichever it is.
+        [crashed] = [
+            c for c in calls(voice_client, voice_tenant, scheduled) if c["status"] == "initiating"
+        ]
         results = run_worker(later=voice_settings.voice_job_lease_seconds + 1)
         assert ("initiate_call", "unknown") in results
-        alice = calls(voice_client, voice_tenant, scheduled)[0]
-        assert (alice["status"], alice["outcome"]) == ("unknown", "initiation_interrupted")
-        assert not any(c.recipient_phone_number == ALICE_PHONE for c in mock_provider.initiated)
+        crashed = next(
+            c for c in calls(voice_client, voice_tenant, scheduled) if c["id"] == crashed["id"]
+        )
+        assert (crashed["status"], crashed["outcome"]) == ("unknown", "initiation_interrupted")
+        assert not any(c.internal_call_id == crashed["id"] for c in mock_provider.initiated)
 
     def test_accepted_but_unacknowledged_call_is_recovered_from_the_provider(
         self, voice_client, voice_tenant, scheduled, run_worker, mock_provider, session

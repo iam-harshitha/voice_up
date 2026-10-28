@@ -28,7 +28,9 @@ PROTECTED = [
 
 @pytest.fixture
 def offline_client():
-    settings = Settings(database_url=UNREACHABLE_DB, app_env="test", log_level="WARNING")
+    settings = Settings(
+        _env_file=None, database_url=UNREACHABLE_DB, app_env="test", log_level="WARNING"
+    )
     app = create_app(settings)
 
     @app.get("/boom")
@@ -84,7 +86,9 @@ def test_request_create_schema_forbids_server_derived_fields(offline_client):
 
 
 def test_docs_are_disabled_in_production():
-    settings = Settings(database_url=UNREACHABLE_DB, app_env="production", log_level="WARNING")
+    settings = Settings(
+        _env_file=None, database_url=UNREACHABLE_DB, app_env="production", log_level="WARNING"
+    )
     with TestClient(create_app(settings)) as client:
         assert client.get("/docs").status_code == 404
         assert client.get("/openapi.json").status_code == 404
@@ -104,7 +108,7 @@ def test_docs_are_disabled_in_production():
 )
 def test_invalid_database_url_fails_fast(url):
     with pytest.raises(ValidationError):
-        Settings(database_url=url)
+        Settings(_env_file=None, database_url=url)
 
 
 def test_missing_database_url_fails_fast(monkeypatch, tmp_path):
@@ -115,10 +119,12 @@ def test_missing_database_url_fails_fast(monkeypatch, tmp_path):
 
 
 def test_cors_origins_parsing_and_wildcard_rejection():
-    settings = Settings(database_url=UNREACHABLE_DB, cors_origins="http://a.test, http://b.test")
+    settings = Settings(
+        _env_file=None, database_url=UNREACHABLE_DB, cors_origins="http://a.test, http://b.test"
+    )
     assert settings.cors_origins == ["http://a.test", "http://b.test"]
     with pytest.raises(ValidationError):
-        Settings(database_url=UNREACHABLE_DB, cors_origins="*")
+        Settings(_env_file=None, database_url=UNREACHABLE_DB, cors_origins="*")
 
 
 # --- Credentials -------------------------------------------------------------------------
