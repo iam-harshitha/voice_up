@@ -294,6 +294,8 @@ def run_initiate(
 
         error = _require(error)
         log["error_category"] = error.category
+        if error.detail:
+            log["provider_message"] = error.detail
         if call.status != CallStatus.INITIATING.value or call.provider_call_id is not None:
             # While our request was in flight, the call was resolved elsewhere: another
             # worker took over an expired lease (and marked it unknown), or a trusted

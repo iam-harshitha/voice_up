@@ -90,10 +90,28 @@ def test_reject_with_low_confidence_is_not_a_vote_either():
     assert result.vote is None and result.reason is NoDecisionReason.LOW_CONFIDENCE
 
 
-def test_masked_number_and_missing_correlation_are_tolerated():
-    # PII masking nulls phone numbers; the provider-call-ID match still binds the call.
-    result = interpret(execution(to_number=None, correlation_id=None), EXPECTED)
+def test_masked_number_is_tolerated():
+    # PII masking nulls phone numbers; the correlation and provider-call IDs still bind.
+    result = interpret(execution(to_number=None), EXPECTED)
     assert result.vote is VoteChoice.APPROVE
+
+
+@pytest.mark.parametrize("correlation_id", [None, "", "call-2", "CALL-1", " call-1"])
+def test_missing_or_mismatched_correlation_id_never_votes(correlation_id):
+    result = interpret(execution(correlation_id=correlation_id), EXPECTED)
+    assert result.vote is None and result.reason is NoDecisionReason.CORRELATION_MISMATCH
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject", "conditional_approve"])
+def test_missing_correlation_id_blocks_every_decision(decision):
+    result = interpret(
+        execution(correlation_id=None, decision=ExtractedAnswer(decision, 0.95)), EXPECTED
+    )
+    assert (result.vote, result.condition, result.reason) == (
+        None,
+        None,
+        NoDecisionReason.CORRELATION_MISMATCH,
+    )
 
 
 @pytest.mark.parametrize(

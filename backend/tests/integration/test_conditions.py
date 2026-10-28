@@ -270,6 +270,16 @@ class TestVoiceConditions:
         assert conditions[0]["description"] == "only after the database backup is verified"
         assert conditions[0]["source"] == "voice"
         assert conditions[0]["voice_call_id"] == call["id"]
+        # Bob then approves unconditionally. Alice's seat holds only a condition, which
+        # never counts as approval, so the request stays pending and unauthorized.
+        bob = mock_provider.complete(dialled["calls"][1]["provider_call_id"], decision="approve")
+        deliver_webhook(voice_client, bob, WEBHOOK_TOKEN)
+        run_worker()
+        request = voice_client.get(
+            f"{API}/requests/{dialled['id']}", headers=dialled["tenant"].agent
+        ).json()
+        assert request["status"] == "pending"
+        assert request["evaluation"]["authorized"] is False
 
     def test_conditional_answer_without_the_condition_is_no_decision(
         self, voice_client, dialled, mock_provider, run_worker, session

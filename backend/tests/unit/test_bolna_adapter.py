@@ -97,6 +97,64 @@ def test_initiate_error_classification(status, body, kind):
     assert API_KEY not in str(caught.value) and "agent_id" not in str(caught.value)
 
 
+def test_rejection_keeps_the_providers_reason_as_a_sanitized_detail():
+    message = "Trial accounts can only make calls to verified phone numbers."
+    provider, _ = provider_with(lambda r: httpx.Response(400, json={"message": message}))
+    with pytest.raises(VoiceProviderError) as caught:
+        provider.initiate_call(CALL)
+    error = caught.value
+    assert (error.kind, error.category, error.detail) == (
+        ErrorKind.PERMANENT,
+        "rejected_400",
+        message,
+    )
+    assert message not in str(error)  # detail is for logs only
+
+
+@pytest.mark.parametrize(
+    ("body", "detail"),
+    [
+        (
+            {"message": f"Number {CALL.recipient_phone_number} is invalid"},
+            "Number <redacted> is invalid",
+        ),
+        ({"message": "Bad number +1 (415) 555-0101"}, "Bad number <redacted>"),
+        ({"message": f"token {TOKEN} rejected"}, "token <redacted> rejected"),
+        ({"message": f"key bn-{'a1' * 16} rejected"}, "key <redacted> rejected"),
+        ({"message": "contact ops@example.com\nnow"}, "contact <redacted> now"),
+        ({"error": "agent not found"}, "agent not found"),
+        ({"error": 400, "message": None}, None),
+        ({"message": ""}, None),
+        (["not", "an", "object"], None),
+        ({"message": "word " * 100}, ("word " * 32)[:160]),
+        ({"message": "x" * 500}, "<redacted>"),
+    ],
+)
+def test_error_detail_is_redacted_and_bounded(body, detail):
+    provider, _ = provider_with(lambda r: httpx.Response(422, json=body))
+    with pytest.raises(VoiceProviderError) as caught:
+        provider.initiate_call(CALL)
+    assert caught.value.detail == detail
+
+
+def test_non_json_error_body_has_no_detail():
+    provider, _ = provider_with(lambda r: httpx.Response(400, content=b"<html>oops</html>"))
+    with pytest.raises(VoiceProviderError) as caught:
+        provider.initiate_call(CALL)
+    assert (caught.value.category, caught.value.detail) == ("rejected_400", None)
+
+
+def test_rate_limit_stays_retryable_with_its_reason():
+    body = {"message": "Number is still activating", "retry_after_seconds": 120}
+    provider, _ = provider_with(lambda r: httpx.Response(429, json=body))
+    with pytest.raises(VoiceProviderError) as caught:
+        provider.initiate_call(CALL)
+    assert (caught.value.kind, caught.value.detail) == (
+        ErrorKind.RETRYABLE,
+        "Number is still activating",
+    )
+
+
 def test_non_json_success_is_ambiguous():
     provider, _ = provider_with(lambda r: httpx.Response(200, content=b"<html>"))
     with pytest.raises(VoiceProviderError) as caught:

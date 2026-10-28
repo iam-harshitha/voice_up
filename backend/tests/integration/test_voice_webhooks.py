@@ -15,6 +15,7 @@ from tests.helpers import (
     create_policy,
     create_request,
     deliver_webhook,
+    get_request,
     list_calls,
     schedule_calls,
     vote,
@@ -46,6 +47,10 @@ def dialled(voice_client, voice_tenant, run_worker, mock_provider):
 
 def request_status(client, tenant, request_id):
     return client.get(f"{API}/requests/{request_id}", headers=tenant.agent).json()["status"]
+
+
+def authorized(client, tenant, request_id):
+    return get_request(client, tenant, request_id)["evaluation"]["authorized"]
 
 
 def count(session, model, *where):
@@ -178,7 +183,7 @@ class TestDeliverySemantics:
         assert count(session, VoiceProviderEvent) == 1
 
     def test_distinct_events_for_one_call_progress_the_lifecycle(
-        self, voice_client, voice_tenant, dialled, mock_provider, run_worker
+        self, voice_client, voice_tenant, dialled, mock_provider, run_worker, session
     ):
         for status in ("ringing", "in-progress", "call-disconnected"):
             payload = mock_provider.set_status(dialled["alice_exec"], status)
@@ -190,6 +195,9 @@ class TestDeliverySemantics:
         alice = list_calls(voice_client, voice_tenant, dialled["request_id"])[0]
         assert alice["status"] == "processing" and alice["answered_at"]
         assert alice["decision_status"] == "awaiting"
+        # call-disconnected arrives before extraction is final: never a decision.
+        assert count(session, ApprovalVote) == 0
+        assert not authorized(voice_client, voice_tenant, dialled["request_id"])
 
     def test_out_of_order_events_never_regress(
         self, voice_client, voice_tenant, dialled, mock_provider, run_worker, session
@@ -252,11 +260,16 @@ class TestDecisions:
         assert recorded.event_data["voice_call_id"] == alice["id"]
 
     def test_explicit_rejection_rejects_the_request(
-        self, voice_client, voice_tenant, dialled, mock_provider, run_worker
+        self, voice_client, voice_tenant, dialled, mock_provider, run_worker, session
     ):
         finish(voice_client, mock_provider, dialled["bob_exec"], decision="reject")
         run_worker()
-        assert request_status(voice_client, voice_tenant, dialled["request_id"]) == "rejected"
+        request = get_request(voice_client, voice_tenant, dialled["request_id"])
+        assert request["status"] == "rejected"
+        assert request["evaluation"]["authorized"] is False
+        assert [v.vote for v in session.scalars(select(ApprovalVote))] == ["reject"]
+        assert count(session, AuditEvent, AuditEvent.event_type == "request.approved") == 0
+        assert count(session, AuditEvent, AuditEvent.event_type == "request.rejected") == 1
 
     @pytest.mark.parametrize(
         ("kwargs", "outcome"),
@@ -264,12 +277,49 @@ class TestDecisions:
             ({"decision": "uncertain"}, "uncertain"),
             ({"decision": "needs_clarification"}, "needs_clarification"),
             ({"decision": None}, "decision_missing"),
+            ({"decision": "maybe"}, "decision_unrecognized"),
             ({"decision": "approve", "confidence": 0.4}, "low_confidence"),
+            ({"decision": "approve", "confidence": None}, "low_confidence"),
             ({"decision": "approve", "identity": "no"}, "identity_not_confirmed"),
             ({"decision": "approve", "identity": None}, "identity_not_confirmed"),
+            ({"decision": "approve", "identity_confidence": 0.5}, "identity_not_confirmed"),
             ({"decision": "approve", "voicemail": True}, "voicemail"),
             ({"extracted_data": {"Approval": "garbage"}}, "extraction_malformed"),
+            (
+                {
+                    "extracted_data": {
+                        "Approval": {
+                            "Decision": {"objective": "approve", "confidence": "High"},
+                            "Identity Confirmed": {"objective": "yes", "confidence": 0.95},
+                        }
+                    }
+                },
+                "extraction_malformed",
+            ),
+            (
+                {
+                    "extracted_data": {
+                        "Approval": {
+                            "Decision": {"objective": True, "confidence": 0.95},
+                            "Identity Confirmed": {"objective": "yes", "confidence": 0.95},
+                        }
+                    }
+                },
+                "extraction_malformed",
+            ),
             ({"extracted_data": {}}, "identity_not_confirmed"),
+            # Wrong category name (e.g. a misconfigured BOLNA_EXTRACTION_CATEGORY).
+            (
+                {
+                    "extracted_data": {
+                        "Other": {
+                            "Decision": {"objective": "approve", "confidence": 0.95},
+                            "Identity Confirmed": {"objective": "yes", "confidence": 0.95},
+                        }
+                    }
+                },
+                "identity_not_confirmed",
+            ),
         ],
     )
     def test_no_valid_decision_means_no_vote(
@@ -293,7 +343,9 @@ class TestDecisions:
         )
         assert count(session, ApprovalVote) == 0
         assert count(session, AuditEvent, AuditEvent.event_type == "voice.decision_rejected") == 1
-        assert request_status(voice_client, voice_tenant, dialled["request_id"]) == "pending"
+        request = get_request(voice_client, voice_tenant, dialled["request_id"])
+        assert request["status"] == "pending"
+        assert request["evaluation"]["authorized"] is False
 
     @pytest.mark.parametrize("status", ["no-answer", "busy", "failed", "balance-low"])
     def test_failed_calls_never_vote(
@@ -346,6 +398,59 @@ class TestDecisions:
         bob = list_calls(voice_client, voice_tenant, dialled["request_id"])[1]
         assert bob["outcome"] == "correlation_mismatch"
         assert count(session, ApprovalVote) == 0
+
+    @pytest.mark.parametrize(
+        "recipient_data",
+        [
+            {},  # approval_line_call_id not echoed
+            {"approval_line_call_id": None},
+            {"approval_line_call_id": ""},
+            {"approval_line_call_id": "not-a-uuid"},
+            {"approval_line_call_id": str(uuid.uuid4())},  # some other call
+        ],
+    )
+    @pytest.mark.parametrize("decision", ["approve", "reject"])
+    def test_missing_or_wrong_internal_call_id_is_refused(
+        self,
+        voice_client,
+        voice_tenant,
+        dialled,
+        mock_provider,
+        run_worker,
+        session,
+        recipient_data,
+        decision,
+    ):
+        payload = mock_provider.payload(dialled["alice_exec"])
+        payload["context_details"]["recipient_data"] = recipient_data
+        mock_provider._store.put(dialled["alice_exec"], payload)
+        finish(voice_client, mock_provider, dialled["alice_exec"], decision=decision)
+        run_worker()
+        alice = list_calls(voice_client, voice_tenant, dialled["request_id"])[0]
+        assert (alice["status"], alice["decision_status"], alice["outcome"]) == (
+            "completed",
+            "no_decision",
+            "correlation_mismatch",
+        )
+        assert count(session, ApprovalVote) == 0
+        request = get_request(voice_client, voice_tenant, dialled["request_id"])
+        assert request["status"] == "pending"
+        assert request["evaluation"]["authorized"] is False
+
+    def test_execution_to_another_number_is_refused(
+        self, voice_client, voice_tenant, dialled, mock_provider, run_worker, session
+    ):
+        payload = mock_provider.payload(dialled["alice_exec"])
+        payload["telephony_data"]["to_number"] = "+14155550199"
+        mock_provider._store.put(dialled["alice_exec"], payload)
+        finish(voice_client, mock_provider, dialled["alice_exec"])
+        run_worker()
+        assert (
+            list_calls(voice_client, voice_tenant, dialled["request_id"])[0]["outcome"]
+            == "correlation_mismatch"
+        )
+        assert count(session, ApprovalVote) == 0
+        assert not authorized(voice_client, voice_tenant, dialled["request_id"])
 
     def test_execution_from_another_agent_is_refused(
         self, voice_client, voice_tenant, dialled, mock_provider, run_worker, session

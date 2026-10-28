@@ -17,6 +17,7 @@ Bolna documents no idempotency key for POST /call, so any failure after the requ
 have reached Bolna is reported as AMBIGUOUS and never retried automatically.
 """
 
+import re
 from typing import Any
 from uuid import UUID
 
@@ -67,6 +68,38 @@ def parse_execution_id(value: object) -> str | None:
 
 def map_status(provider_status: str) -> CallStatus | None:
     return _STATUS_MAP.get(provider_status)
+
+
+MAX_ERROR_DETAIL = 160
+_DIGIT_RUN = re.compile(r"\+?\d[\d\s().-]{5,}\d")  # phone numbers, account numbers
+_LONG_TOKEN = re.compile(r"[A-Za-z0-9_\-]{24,}")  # keys, tokens, IDs
+_EMAIL = re.compile(r"\S+@\S+")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def error_detail(response: httpx.Response) -> str | None:
+    """Bolna's explanation of a refused request, safe to log.
+
+    Only the documented ``message`` (or a string ``error``) is read, never the whole
+    body. Phone numbers, e-mail addresses and anything token-like are redacted.
+    """
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    message = data.get("message")
+    if not isinstance(message, str):
+        message = data.get("error") if isinstance(data.get("error"), str) else None
+    if not message:
+        return None
+    text = _CONTROL.sub(" ", message)
+    text = _EMAIL.sub("<redacted>", text)
+    text = _DIGIT_RUN.sub("<redacted>", text)
+    text = _LONG_TOKEN.sub("<redacted>", text)
+    text = " ".join(text.split())[:MAX_ERROR_DETAIL]
+    return text or None
 
 
 def _answer(block: Any) -> tuple[ExtractedAnswer | None, bool]:
@@ -222,11 +255,14 @@ class BolnaProvider:
         if code in (401, 403):
             raise VoiceProviderError(ErrorKind.PERMANENT, "auth_failed")
         if code == 429:
-            raise VoiceProviderError(ErrorKind.RETRYABLE, "rate_limited")
+            raise VoiceProviderError(ErrorKind.RETRYABLE, "rate_limited", error_detail(response))
         if code == 503:
             raise VoiceProviderError(ErrorKind.RETRYABLE, "provider_unavailable")
         if 400 <= code < 500:
-            raise VoiceProviderError(ErrorKind.PERMANENT, f"rejected_{code}")
+            # e.g. 400 "Trial accounts can only make calls to verified phone numbers."
+            raise VoiceProviderError(
+                ErrorKind.PERMANENT, f"rejected_{code}", error_detail(response)
+            )
         # 500/502/504 etc.: the call may or may not have been created.
         raise VoiceProviderError(ErrorKind.AMBIGUOUS, f"provider_error_{code}")
 

@@ -77,13 +77,12 @@ def interpret(execution: ProviderExecution, expected: ExpectedCall) -> Interpret
         return _no(NoDecisionReason.CALL_NOT_COMPLETED)
 
     # The execution must be the exact call we placed, to the person we placed it to.
+    # The echoed correlation ID is required: a missing one fails closed. The number is
+    # checked only when present, because Bolna's PII masking nulls phone numbers.
     if (
         execution.provider_call_id != expected.provider_call_id
         or execution.agent_id != expected.agent_id
-        or (
-            execution.correlation_id is not None
-            and execution.correlation_id != expected.internal_call_id
-        )
+        or execution.correlation_id != expected.internal_call_id
         or (
             execution.to_number is not None
             and expected.recipient_phone_number is not None
