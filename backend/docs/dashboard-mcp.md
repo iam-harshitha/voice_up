@@ -135,9 +135,9 @@ MCP client configuration (placeholders; keep the real key in the client's secret
 {
   "mcpServers": {
     "approval-line": {
-      "command": "D:/voice_up/env/Scripts/python.exe",
+      "command": "<repo>/env/Scripts/python.exe",
       "args": ["-m", "approval_line_agents.mcp_server"],
-      "cwd": "D:/voice_up/backend",
+      "cwd": "<repo>/backend",
       "env": { "APPROVAL_LINE_API_URL": "http://127.0.0.1:8000", "APPROVAL_LINE_API_KEY": "<agent key>" }
     }
   }

@@ -226,8 +226,8 @@ the policy `version` and is recorded in `policy.updated` (`changed_fields`).
   `voice.auto_dial_failed` records the `policy_id`, `policy_version` and `reason`
   (`voice_unavailable`, `no_callable_approvers`, `scheduling_error`, …). An operator can
   then schedule calls manually. Nothing is retried automatically.
-- **Status: mock-verified only.** Covered by `tests/integration/test_auto_dial.py` with
-  the mock provider; no live Bolna call has been placed through auto-dial yet.
+- **Status:** covered by `tests/integration/test_auto_dial.py` with the mock provider, and
+  live-verified with Bolna on 2026-10-29 (see Live verification below).
 
 ### Bolna's "Send test" button returns 400, by design
 
@@ -268,11 +268,26 @@ behind a Cloudflare quick tunnel:
       voice.decision_accepted`. The request became `approved`, `evaluation.authorized: true`.
 - [x] Send test: 400 with the correct token, 401 without (see above).
 
+Second live session, 2026-10-29, same setup, one approver, every call placed by
+auto-dial:
+
+- [x] Approval through the Claude Code guard: `approved`, `authorized: true`
+      (`quorum_met`), about 2 minutes from request to decision.
+- [x] Spoken rejection through the guard: `rejected` (`veto`); the guard exited 2 with
+      the STOP instruction.
+- [x] "Hmm, I'm not sure": extracted as `uncertain` (confidence 1.0), outcome
+      `uncertain`, no vote; the request stayed `pending` / `awaiting_decisions`.
+- [x] Identity not clearly confirmed: outcome `identity_not_confirmed`, no vote.
+- [x] Declined call: provider status `busy`, call `failed`, no vote, no automatic re-dial;
+      the request stayed `pending`.
+- [x] Unverified number after a change in Bolna: initiation refused (400), call
+      `failed` / `initiation_rejected`, no vote, no retry.
+
 Not yet tested live (covered by mock tests only):
 
-- [ ] Spoken rejection, "not sure", and needs clarification.
+- [ ] Needs clarification.
 - [ ] Conditional approval: condition recorded, then resolved, then re-approval call.
-- [ ] No-answer, busy, voicemail.
+- [ ] Unanswered ring-out (`no-answer`) and voicemail.
 - [ ] A lost webhook recovered by reconciliation.
 - [ ] Two-approver and quorum policies by phone.
 - [ ] Any deployment other than the local API behind a quick tunnel.

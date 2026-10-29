@@ -11,7 +11,9 @@ from approvers' votes, and the agent reads back `pending` / `approved` / `reject
 
 - **Chunk 1 (done):** the core approval backend in `backend/`.
 - **Chunk 2 (done):** Bolna voice calls to approvers (`backend/docs/voice-bolna.md`).
-  One live approval call succeeded on 2026-10-28; other paths are mock-verified only.
+  Live-verified on 2026-10-28/29 with one approver (approve, reject, uncertain, declined
+  call, unconfirmed identity, unverified number); conditions, multi-approver policies and
+  reconciliation are mock-verified only.
 - **Chunk 3 (done):** quorum/veto, conditional approvals, deadlines, escalation to
   backups, policy audit events, audit timeline API (`backend/docs/policies.md`).
 - **Chunk 4 (done, mock-verified):** React dashboard (`frontend/`) with cookie sessions +

@@ -1,6 +1,6 @@
 # Demo and pitch guide
 
-Everything here describes what the code does and what has been verified. Approval Line has no customers, revenue, certifications or production deployment, and its live Bolna calling is not yet verified. Don't imply otherwise.
+Everything here describes what the code does and what has been verified. Approval Line has no customers, revenue, certifications or production deployment, and its live Bolna calling has been verified only locally, behind a tunnel, with single-approver policies (see `voice-bolna.md`, Live verification). Don't imply otherwise.
 
 ## The problem, in plain language
 

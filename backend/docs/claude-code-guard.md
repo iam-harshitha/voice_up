@@ -6,10 +6,12 @@ Approvers are phoned by the backend (the rule's policy has `auto_dial` on). The 
 itself never schedules calls and needs no voice scope.
 
 **Status:** tested with a fake backend and, end to end, against the real API with the mock
-voice provider (`tests/agents/test_guard.py`, `tests/integration/test_guard_e2e.py`). It has
-**not** yet been run inside a live Claude Code session or with a live Bolna call. Before a
-live demo, run `scripts\demo-doctor.ps1` (read-only preflight) and work through
-`demo-target/REHEARSAL.md`.
+voice provider (`tests/agents/test_guard.py`, `tests/integration/test_guard_e2e.py`).
+Live-verified on 2026-10-29 inside a Claude Code session (v2.1.312) started in
+`demo-target/`, with Bolna calls: an approved deploy ran and wrote its record, and a
+rejected one was blocked, after which Claude reported the reason and request ID, did not
+retry and asked how to proceed. Before a live demo, run `scripts\demo-doctor.ps1`
+(read-only preflight) and work through `demo-target/REHEARSAL.md`.
 
 ## Architecture
 

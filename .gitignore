@@ -18,6 +18,9 @@ venv/
 .env.*
 !.env.example
 
+# Logs anywhere (demo logs also live under .demo/)
+*.log
+
 # Editors / OS
 .vscode/
 .idea/

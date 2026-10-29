@@ -65,8 +65,12 @@ when a command is blocked, never to retry it or work around it.
    ```
 
 4. **Check the guard without calling anyone.** A harmless command must pass silently
-   (exit 0) and needs no network:
+   (exit 0) and needs no network. Windows PowerShell 5.1 prefixes text it pipes into a
+   program with a UTF-8 byte-order mark, which the guard rejects as invalid JSON (exit 2,
+   fail closed). The first line below switches that off for this window. Claude Code
+   itself sends the hook clean JSON, so this only matters for manual checks:
    ```powershell
+   [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false
    '{"tool_name":"Bash","tool_input":{"command":"ls"},"session_id":"check","cwd":"."}' | ..\env\Scripts\python.exe -m approval_line_agents.guard; $LASTEXITCODE
    ```
    Don't pipe a `./deploy.sh production` input in the same way unless you mean it. That
@@ -77,14 +81,14 @@ when a command is blocked, never to retry it or work around it.
    key from `${APPROVAL_LINE_API_KEY}`, so no secret is stored. Claude Code asks you to
    approve the project server the first time. To register it by hand instead:
    ```powershell
-   claude mcp add --transport stdio --env APPROVAL_LINE_API_URL=http://127.0.0.1:8000 approval-line -- D:\voice_up\env\Scripts\python.exe -m approval_line_agents.mcp_server
+   claude mcp add --transport stdio --env APPROVAL_LINE_API_URL=http://127.0.0.1:8000 approval-line -- (Resolve-Path ..\env\Scripts\python.exe).Path -m approval_line_agents.mcp_server
    ```
    Note that `--env APPROVAL_LINE_API_KEY=...` would store the key in Claude Code's
    config file; the `.mcp.json` route avoids that.
 
 6. **Start Claude Code here:**
    ```powershell
-   cd D:\voice_up\demo-target
+   cd <repo>\demo-target    # you are probably here already
    claude
    ```
    Accept the workspace trust dialog if asked: the pre-allow rule (below) only applies in a
