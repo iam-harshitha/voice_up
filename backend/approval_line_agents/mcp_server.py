@@ -26,6 +26,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
+from approval_line_agents.authorization import Clock, RestGateway, WaitConfig, wait_for_decision
 from approval_line_agents.client import (
     ApiResponseError,
     ApprovalLineClient,
@@ -38,10 +39,16 @@ from approval_line_agents.client import (
 
 logger = logging.getLogger("approval_line_agents.mcp_server")
 
+# One wait_for_approval_decision call stays well below common MCP tool-call timeouts;
+# the agent calls it again while the request is still pending.
+MAX_WAIT_SECONDS = 60
+DEFAULT_WAIT_SECONDS = 30
+
 SERVER_NAME = "approval-line"
 INSTRUCTIONS = (
     "Approval Line provides human authorization for consequential actions. Call "
-    "request_approval before acting, then get_approval_status until the request is final. "
+    "request_approval before acting, then wait_for_approval_decision (or "
+    "get_approval_status) until the request is final. "
     "Proceed ONLY when the result has authorized=true and status='approved' for the same "
     "request_id and action. pending, rejected, expired and condition-blocked results mean "
     "do not act. Errors mean the authorization state is unknown: do not act."
@@ -148,6 +155,12 @@ class PolicyResult(BaseModel):
     decision_deadline_seconds: int | None
     escalation_after_seconds: int | None
     max_escalations: int
+    auto_dial: bool | None = Field(
+        description=(
+            "True: approvers are called automatically when a request is created. False: an "
+            "operator must schedule the calls. Null: not reported by this backend."
+        )
+    )
 
 
 def guidance_for(status: ApprovalStatus) -> str:
@@ -225,8 +238,8 @@ def tool_error(exc: ApprovalLineError) -> ToolError:
     return ToolError(text)
 
 
-def build_server(client: ApprovalLineClient) -> MCPServer:
-    server = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS, version="0.4.0")
+def build_server(client: ApprovalLineClient, *, clock: Clock | None = None) -> MCPServer:
+    server = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS, version="0.5.0")
 
     async def run(tool: str, coro: Any) -> Any:
         try:
@@ -356,7 +369,45 @@ def build_server(client: ApprovalLineClient) -> MCPServer:
             decision_deadline_seconds=policy.decision_deadline_seconds,
             escalation_after_seconds=policy.escalation_after_seconds,
             max_escalations=policy.max_escalations,
+            auto_dial=policy.auto_dial,
         )
+
+    @server.tool(
+        description=(
+            "Wait (bounded) for an approval request to become final, then return its "
+            "authoritative state. Returns as soon as it is approved, rejected or expired; if "
+            f"max_wait_seconds (at most {MAX_WAIT_SECONDS}) passes first, returns the current "
+            "pending state: call this tool again to keep waiting. Only authorized=true with "
+            "status='approved' permits the action."
+        )
+    )
+    async def wait_for_approval_decision(
+        request_id: RequestId,
+        max_wait_seconds: Annotated[
+            int,
+            Field(ge=1, le=MAX_WAIT_SECONDS, description="Upper bound for this call (s)."),
+        ] = DEFAULT_WAIT_SECONDS,
+    ) -> ApprovalStatusResult:
+        config = WaitConfig(poll_interval=2.0, max_interval=10.0, timeout=float(max_wait_seconds))
+        outcome = await wait_for_decision(RestGateway(client), request_id, config, clock=clock)
+        if outcome.error is not None:
+            # Malformed, unreachable or refused: the state is unknown; never a success.
+            logger.info(
+                "tool_failed",
+                extra={"tool": "wait_for_approval_decision", "code": outcome.error.code},
+            )
+            raise tool_error(outcome.error)
+        if outcome.status is None:
+            # The wait ended before any poll succeeded (transient outage).
+            raise ToolError(
+                "backend_unavailable (no_status): the state could not be read before the wait "
+                "ended. The authorization state is unknown; do not act."
+            )
+        logger.info(
+            "tool_succeeded",
+            extra={"tool": "wait_for_approval_decision", "outcome": outcome.outcome.value},
+        )
+        return status_result(outcome.status)
 
     return server
 

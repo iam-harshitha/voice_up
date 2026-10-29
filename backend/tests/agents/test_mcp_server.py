@@ -27,14 +27,26 @@ TOOLS = {
     "list_approval_requests",
     "get_approval_timeline",
     "get_approval_policy",
+    "wait_for_approval_decision",
 }
 
 
-def server_for(handler):
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    async def sleep(self, seconds):
+        self.now += seconds
+
+
+def server_for(handler, clock=None):
     client = ApprovalLineClient(
         ClientSettings("http://backend.test", SECRET, 5), transport=httpx.MockTransport(handler)
     )
-    return build_server(client)
+    return build_server(client, clock=clock or FakeClock())
 
 
 async def _call(handler, tool, arguments):
@@ -272,6 +284,7 @@ def test_list_and_timeline_and_policy_tools():
                     "decision_deadline_seconds": 3600,
                     "escalation_after_seconds": None,
                     "max_escalations": 0,
+                    "auto_dial": True,
                     "created_at": "2026-10-24T10:00:00Z",
                     "updated_at": "2026-10-24T10:00:00Z",
                 },
@@ -284,6 +297,7 @@ def test_list_and_timeline_and_policy_tools():
     assert timeline["items"][0]["event_type"] == "request.created"
     policy = call(handler, "get_approval_policy", {"policy_id": str(POLICY_ID)}).structured_content
     assert policy["required_approvals"] == 2 and policy["approvers"][0]["name"] == "Alice"
+    assert policy["auto_dial"] is True
     assert "phone" not in json.dumps(policy) and "email" not in json.dumps(policy)
 
 
@@ -382,3 +396,77 @@ def test_malformed_idempotency_keys_never_reach_the_backend(key):
         {"policy_id": str(POLICY_ID), "action": "a", "summary": "s", "idempotency_key": key},
     )
     assert result.is_error and calls == []
+
+
+# --- wait_for_approval_decision ------------------------------------------------------------
+
+
+def scripted(kinds, rid, calls):
+    """Answer successive status polls with the given kinds (the last one repeats)."""
+    kinds = list(kinds)
+
+    def handler(request):
+        calls.append(request.url.path)
+        kind = kinds.pop(0) if len(kinds) > 1 else kinds[0]
+        if isinstance(kind, httpx.Response):
+            return kind
+        return httpx.Response(200, json=request_payload(kind, rid))
+
+    return handler
+
+
+def wait(handler, rid, **arguments):
+    return call(handler, "wait_for_approval_decision", {"request_id": str(rid), **arguments})
+
+
+def test_wait_returns_as_soon_as_the_request_is_approved():
+    rid, calls = uuid.uuid4(), []
+    result = wait(scripted(["pending", "pending", "approved"], rid, calls), rid)
+    assert not result.is_error
+    assert result.structured_content["status"] == "approved"
+    assert result.structured_content["authorized"] is True
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("kind", ["rejected", "expired"])
+def test_wait_returns_final_negative_states(kind):
+    rid = uuid.uuid4()
+    result = wait(scripted([kind], rid, []), rid).structured_content
+    assert (result["status"], result["authorized"]) == (kind, False)
+
+
+@pytest.mark.parametrize("kind", ["pending", "condition", "reapproval"])
+def test_wait_is_bounded_and_returns_the_current_pending_state(kind):
+    rid, calls = uuid.uuid4(), []
+    result = wait(scripted([kind], rid, calls), rid, max_wait_seconds=20).structured_content
+    assert (result["status"], result["authorized"]) == ("pending", False)
+    assert "do not perform" in result["guidance"].lower() or "keep waiting" in result["guidance"]
+    assert 1 < len(calls) <= 10  # bounded by max_wait_seconds on the (fake) clock
+
+
+@pytest.mark.parametrize("seconds", [0, 61, 3600])
+def test_wait_rejects_unbounded_waits_before_any_backend_call(seconds):
+    calls = []
+    result = wait(
+        scripted(["pending"], uuid.uuid4(), calls), uuid.uuid4(), max_wait_seconds=seconds
+    )
+    assert result.is_error and calls == []
+
+
+def test_wait_reports_untrustworthy_and_unreachable_backends_as_errors():
+    rid = uuid.uuid4()
+    malformed = httpx.Response(200, json={"id": str(rid), "status": "approved"})
+    text = error_text(wait(scripted([malformed], rid, []), rid))
+    assert "untrusted_response" in text and SECRET not in text
+    down = httpx.Response(503, json={})
+    text = error_text(wait(scripted([down], rid, []), rid))
+    assert "backend_unavailable" in text
+
+
+def test_wait_never_reports_another_requests_approval():
+    rid, other = uuid.uuid4(), uuid.uuid4()
+
+    def handler(request):
+        return httpx.Response(200, json=request_payload("approved", other))
+
+    assert "untrusted_response" in error_text(wait(handler, rid))

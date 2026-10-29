@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "approval-line": {
+      "command": "${CLAUDE_PROJECT_DIR:-.}/../env/Scripts/python.exe",
+      "args": ["-m", "approval_line_agents.mcp_server"],
+      "env": {
+        "APPROVAL_LINE_API_URL": "${APPROVAL_LINE_API_URL}",
+        "APPROVAL_LINE_API_KEY": "${APPROVAL_LINE_API_KEY}",
+        "APPROVAL_LINE_MCP_LOG_LEVEL": "WARNING"
+      },
+      "timeout": 90000
+    }
+  }
+}

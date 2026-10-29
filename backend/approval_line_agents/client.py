@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -161,6 +162,8 @@ class Policy(_Model):
     decision_deadline_seconds: StrictInt | None
     escalation_after_seconds: StrictInt | None
     max_escalations: StrictInt
+    # None when the backend predates the field (unknown, not "off").
+    auto_dial: StrictBool | None = None
 
 
 def parse_status(payload: Any) -> ApprovalStatus:
@@ -215,15 +218,21 @@ class ClientSettings:
 
     @classmethod
     def from_env(cls, prefix: str = "APPROVAL_LINE_") -> ClientSettings:
-        base_url = os.environ.get(f"{prefix}API_URL", "").strip()
-        api_key = os.environ.get(f"{prefix}API_KEY", "").strip()
+        return cls.from_env_mapping(os.environ, prefix)
+
+    @classmethod
+    def from_env_mapping(
+        cls, env: Mapping[str, str], prefix: str = "APPROVAL_LINE_"
+    ) -> ClientSettings:
+        base_url = env.get(f"{prefix}API_URL", "").strip()
+        api_key = env.get(f"{prefix}API_KEY", "").strip()
         if not base_url:
             raise ValueError(f"{prefix}API_URL is not set")
         if not api_key:
             raise ValueError(f"{prefix}API_KEY is not set")
         if not base_url.startswith(("http://", "https://")):
             raise ValueError(f"{prefix}API_URL must start with http:// or https://")
-        raw_timeout = os.environ.get(f"{prefix}TIMEOUT_SECONDS", "").strip()
+        raw_timeout = env.get(f"{prefix}TIMEOUT_SECONDS", "").strip()
         timeout = float(raw_timeout) if raw_timeout else DEFAULT_TIMEOUT_SECONDS
         if not 0 < timeout <= 120:
             raise ValueError(f"{prefix}TIMEOUT_SECONDS must be in (0, 120]")

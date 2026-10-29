@@ -164,3 +164,8 @@ Chunk 4 invariants (see `backend/docs/dashboard-mcp.md`):
   test behaviour. Never run two pytest processes (or the latency script) at once: they
   share the test database.
 - MCP stdio: stdout is protocol only; log to stderr; never put the key in results/errors.
+- The gate and bounded waiting live in `approval_line_agents/authorization.py`, shared by
+  the demo agent, the MCP `wait_for_approval_decision` tool and the Claude Code guard
+  (`approval_line_agents/guard.py`, `backend/docs/claude-code-guard.md`). The guard fails
+  closed: every path other than an approval that passes `execution_gate` exits 2. It never
+  schedules calls (auto-dial does). Its hook is registered only in `demo-target/.claude/`.

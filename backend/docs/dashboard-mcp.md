@@ -5,6 +5,10 @@ Chunk 4 adds three interfaces on top of the Chunk 1–3 backend:
 - an **MCP server** (`backend/approval_line_agents/mcp_server.py`);
 - a **demo agent** (`backend/approval_line_agents/demo.py`).
 
+A Claude Code execution guard (a PreToolUse hook) was added later; see
+`claude-code-guard.md`. It shares the demo agent's gate and waiting code
+(`approval_line_agents/authorization.py`).
+
 All three use the same FastAPI application, the same PostgreSQL state and the same policy engine. None of them computes a decision. The backend's `evaluation` is the only authority, and only `status: "approved"` together with `evaluation.authorized: true` permits an action.
 
 ```
@@ -146,7 +150,8 @@ MCP client configuration (placeholders; keep the real key in the client's secret
 | `get_approval_status` | `request_id` (UUID) | `ApprovalStatusResult` | `requests:read` |
 | `list_approval_requests` | `status?` (pending/approved/rejected/expired), `limit` 1–50, `offset` 0–10000 | `{items, total, limit, offset}` | `requests:read` |
 | `get_approval_timeline` | `request_id`, `after` ≥ 0, `limit` 1–200 | `{request_id, items, next_after}` | `audit:read` |
-| `get_approval_policy` | `policy_id` | policy rules (approver names only) | `policies:read` |
+| `get_approval_policy` | `policy_id` | policy rules (approver names only), including `auto_dial` (`true`: approvers are called automatically; `null`: not reported by the backend) | `policies:read` |
+| `wait_for_approval_decision` | `request_id`, `max_wait_seconds` 1–60 (default 30) | `ApprovalStatusResult`, returned as soon as the request is approved, rejected or expired; when the bound passes first, the current pending state (call again to keep waiting). An untrustworthy or unreachable backend is a tool error | `requests:read` |
 
 `ApprovalStatusResult` contains:
 - `request_id`, `action`, `summary`, `policy_id`, `policy_version`;

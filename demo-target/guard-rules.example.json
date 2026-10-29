@@ -1,0 +1,25 @@
+{
+  "rules": [
+    {
+      "name": "production deploy",
+      "pattern": "(^|[\\s;&|(])(\\./)?deploy\\.(sh|ps1|cmd)\\s+production\\b",
+      "policy_id": "<DEPLOY_POLICY_ID>",
+      "action": "deploy_to_production",
+      "summary": "Claude Code wants to deploy to production by running: {command} (in {cwd})."
+    },
+    {
+      "name": "git push",
+      "pattern": "\\bgit\\b[^;&|]*\\bpush\\b",
+      "policy_id": "<GIT_PUSH_POLICY_ID>",
+      "action": "git_push",
+      "summary": "Claude Code wants to push code to a remote repository by running: {command} (in {cwd})."
+    },
+    {
+      "name": "recursive force delete",
+      "pattern": "\\brm\\s+(-[a-zA-Z]*[rR][a-zA-Z]*[fF]|-[a-zA-Z]*[fF][a-zA-Z]*[rR]|(-[rR]|--recursive)\\s+(-f|--force)|(-f|--force)\\s+(-[rR]|--recursive))\\b",
+      "policy_id": "<DELETE_POLICY_ID>",
+      "action": "recursive_force_delete",
+      "summary": "Claude Code wants to permanently delete files by running: {command} (in {cwd})."
+    }
+  ]
+}

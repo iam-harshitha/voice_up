@@ -33,6 +33,12 @@ Thumbs.db
 # Local demo process state and logs (scripts/start-demo.ps1)
 .demo/
 
+# Claude Code guard demo: simulated deployment records and the local rules file
+demo-target/output/*
+!demo-target/output/.gitkeep
+demo-target/guard-rules.json
+demo-target/.claude/settings.local.json
+
 # Dashboard (frontend) build output and dependencies
 node_modules/
 frontend/dist/

@@ -28,14 +28,27 @@ import asyncio
 import json
 import os
 import sys
-import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 from uuid import UUID, uuid4
 
+# The gate and waiting code are shared with the Claude Code guard and the MCP server;
+# they are re-exported here so existing imports from this module keep working.
+from approval_line_agents.authorization import (
+    ApprovalGateway,
+    Clock,
+    IntendedAction,
+    Outcome,
+    Reporter,
+    RestGateway,
+    WaitConfig,
+    describe,
+    execution_gate,
+    wait_for_decision,
+)
 from approval_line_agents.client import (
     IDEMPOTENCY_KEY_PATTERN,
     ApiResponseError,
@@ -65,41 +78,20 @@ EXIT_MALFORMED = 13
 EXIT_UNAVAILABLE = 14
 EXIT_GATE_REFUSED = 15
 
+# How each way a wait can end maps to this agent's exit code.
+EXIT_CODES = {
+    Outcome.APPROVED: EXIT_EXECUTED,
+    Outcome.REJECTED: EXIT_REJECTED,
+    Outcome.EXPIRED: EXIT_EXPIRED,
+    Outcome.TIMEOUT: EXIT_TIMEOUT,
+    Outcome.MALFORMED: EXIT_MALFORMED,
+    Outcome.UNAVAILABLE: EXIT_UNAVAILABLE,
+}
+# Outcomes the agent reports as "...; not deploying".
+_NOT_DEPLOYING = frozenset({Outcome.REJECTED, Outcome.EXPIRED, Outcome.TIMEOUT})
+
 
 # --- Gateways: how the agent talks to Approval Line --------------------------------------
-
-
-class ApprovalGateway(Protocol):
-    async def create(
-        self,
-        policy_id: UUID,
-        action: str,
-        summary: str,
-        context: dict[str, Any],
-        idempotency_key: str,
-    ) -> ApprovalStatus: ...
-
-    async def status(self, request_id: UUID) -> ApprovalStatus: ...
-
-
-class RestGateway:
-    def __init__(self, client: ApprovalLineClient) -> None:
-        self._client = client
-
-    async def create(
-        self,
-        policy_id: UUID,
-        action: str,
-        summary: str,
-        context: dict[str, Any],
-        idempotency_key: str,
-    ) -> ApprovalStatus:
-        return await self._client.create_request(
-            policy_id, action, summary, context, idempotency_key=idempotency_key
-        )
-
-    async def status(self, request_id: UUID) -> ApprovalStatus:
-        return await self._client.get_status(request_id)
 
 
 def status_from_tool_result(structured: Any) -> ApprovalStatus:
@@ -181,161 +173,9 @@ class McpGateway:
         return status
 
 
-# --- The execution gate -------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class IntendedAction:
-    """What the agent wants to do. Approval only counts if it is for exactly this."""
-
-    policy_id: UUID
-    action: str
-    summary: str
-
-
-@dataclass(frozen=True)
-class GateDecision:
-    allowed: bool
-    reason: str
-
-
-def execution_gate(
-    intended: IntendedAction, request_id: UUID, status: ApprovalStatus
-) -> GateDecision:
-    """Second, independent check before acting. Every condition must hold."""
-    e = status.evaluation
-    checks = (
-        (status.request_id == request_id, "request ID does not match the created request"),
-        (status.action == intended.action, "approved action differs from the intended action"),
-        (status.summary == intended.summary, "approved summary differs from the proposal"),
-        (status.policy_id == intended.policy_id, "request is under a different policy"),
-        (status.status == "approved", f"request status is {status.status!r}, not 'approved'"),
-        (e.authorized is True, "backend did not report authorized=true"),
-        (e.state == "approved" and e.reason == "quorum_met", "evaluation is not final approval"),
-        (e.next_action == "none", "evaluation still requires an action"),
-        (status.decided_at is not None, "request has no decision time"),
-        # The deadline limits when a decision can be MADE, not when an approval may be
-        # used: the backend refuses votes at or after expires_at, so a genuine approval
-        # is always decided strictly before it. `evaluation.deadline_passed` only says
-        # the clock is now past expires_at, which is also true for an approval observed
-        # late (slow poll, --resume, agent restart), so it must not block execution.
-        (
-            status.expires_at is None
-            or (status.decided_at is not None and status.decided_at < status.expires_at),
-            "approval was not decided before the request's deadline",
-        ),
-    )
-    for ok, reason in checks:
-        if not ok:
-            return GateDecision(False, reason)
-    return GateDecision(True, "authorized by Approval Line")
-
-
-# --- Waiting ---------------------------------------------------------------------------------
-
-
-@dataclass
-class WaitOutcome:
-    exit_code: int
-    message: str
-    status: ApprovalStatus | None = None
-    polls: int = 0
-
-
-@dataclass
-class WaitConfig:
-    poll_interval: float = 2.0
-    max_interval: float = 15.0
-    backoff: float = 1.5
-    timeout: float = 600.0
-    max_transient_failures: int = 3
-
-
-@dataclass
-class Clock:
-    monotonic: Callable[[], float] = time.monotonic
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
-
-
-Reporter = Callable[[str], None]
-
-
 def say(line: str) -> None:
     """Progress output, flushed at once so it is visible even when piped or logged."""
     print(line, flush=True)
-
-
-def describe(status: ApprovalStatus) -> str:
-    e = status.evaluation
-    text = (
-        f"status={status.status} authorized={str(e.authorized).lower()} state={e.state} "
-        f"reason={e.reason} next_action={e.next_action} "
-        f"approvals={e.approvals}/{e.required_approvals}"
-    )
-    if e.condition_approver_ids:
-        text += f" open_conditions={len(e.condition_approver_ids)}"
-    if e.reapproval_approver_ids:
-        text += f" awaiting_reapproval={len(e.reapproval_approver_ids)}"
-    return text
-
-
-async def wait_for_decision(
-    gateway: ApprovalGateway,
-    request_id: UUID,
-    config: WaitConfig,
-    report: Reporter,
-    clock: Clock | None = None,
-) -> WaitOutcome:
-    """Poll until the request is final, the timeout passes, or something is untrustworthy.
-
-    Never creates requests, never retries a creation, never treats an error as approval.
-    """
-    clock = clock or Clock()
-    deadline = clock.monotonic() + config.timeout
-    interval = config.poll_interval
-    failures = 0
-    polls = 0
-    last: ApprovalStatus | None = None
-    last_line = ""
-    while True:
-        try:
-            status = await gateway.status(request_id)
-            polls += 1
-            failures = 0
-        except MalformedResponseError as exc:
-            return WaitOutcome(
-                EXIT_MALFORMED, f"untrustworthy response: {exc.message}", last, polls
-            )
-        except BackendUnavailableError as exc:
-            failures += 1
-            report(f"  backend unavailable ({exc.code}); attempt {failures}")
-            if failures >= config.max_transient_failures:
-                return WaitOutcome(
-                    EXIT_UNAVAILABLE, "cannot verify the decision: backend unavailable", last, polls
-                )
-        except ApprovalLineError as exc:
-            return WaitOutcome(
-                EXIT_UNAVAILABLE, f"backend refused the status check: {exc.code}", last, polls
-            )
-        else:
-            last = status
-            line = describe(status)
-            if line != last_line:
-                report(f"  {line}")
-                last_line = line
-            if status.status == "approved":
-                return WaitOutcome(EXIT_EXECUTED, "approved", status, polls)
-            if status.status == "rejected":
-                return WaitOutcome(EXIT_REJECTED, "rejected; not deploying", status, polls)
-            if status.status == "expired" or status.evaluation.deadline_passed:
-                return WaitOutcome(EXIT_EXPIRED, "deadline passed; not deploying", status, polls)
-        remaining = deadline - clock.monotonic()
-        if remaining <= 0:
-            return WaitOutcome(
-                EXIT_TIMEOUT, "timed out while still not authorized; not deploying", last, polls
-            )
-        await clock.sleep(min(interval, remaining))
-        interval = min(interval * config.backoff, config.max_interval)
 
 
 # --- Harmless execution -----------------------------------------------------------------------
@@ -420,11 +260,12 @@ async def run_agent(
 
     report("Waiting for the authoritative decision (the agent will not act until then)...")
     outcome = await wait_for_decision(gateway, request_id, config, report, clock)
-    if outcome.exit_code != EXIT_EXECUTED or outcome.status is None:
-        report(f"HALTED: {outcome.message}")
+    if outcome.outcome is not Outcome.APPROVED or outcome.status is None:
+        suffix = "; not deploying" if outcome.outcome in _NOT_DEPLOYING else ""
+        report(f"HALTED: {outcome.message}{suffix}")
         if outcome.status is not None:
             report(f"  final state: {describe(outcome.status)}")
-        return outcome.exit_code
+        return EXIT_CODES[outcome.outcome]
 
     decision = execution_gate(intended, request_id, outcome.status)
     if not decision.allowed:
