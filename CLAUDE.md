@@ -50,6 +50,7 @@ python -m approval_line_agents.demo --policy-id <id>
 python -m app.cli demo-seed --org-id <id> --yes [--issue-agent-key]   # dev only, additive
 python scripts/measure_latency.py            # test DB only; never while pytest runs
 # repo root: .\scripts\start-demo.ps1 -Migrate ; .\scripts\stop-demo.ps1
+# repo root: .\scripts\demo-doctor.ps1    # read-only live-demo preflight (no calls, no secrets)
 # frontend (from frontend/): npm ci; npm run dev | typecheck | test | build | check:bundle
 ruff check . ; ruff format .
 ```
@@ -168,4 +169,6 @@ Chunk 4 invariants (see `backend/docs/dashboard-mcp.md`):
   the demo agent, the MCP `wait_for_approval_decision` tool and the Claude Code guard
   (`approval_line_agents/guard.py`, `backend/docs/claude-code-guard.md`). The guard fails
   closed: every path other than an approval that passes `execution_gate` exits 2. It never
-  schedules calls (auto-dial does). Its hook is registered only in `demo-target/.claude/`.
+  schedules calls (auto-dial does). Its hook is registered only in `demo-target/.claude/`,
+  for both shell tools (`Bash|PowerShell`: on Windows PowerShell is Claude's default
+  shell). Every block message ends with `STOP_INSTRUCTION` (no retries, no workarounds).

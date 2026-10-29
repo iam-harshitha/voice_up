@@ -25,6 +25,7 @@ from approval_line_agents.guard import (
     EXIT_ALLOW,
     EXIT_BLOCK,
     MAX_COMMAND_CONTEXT_BYTES,
+    STOP_INSTRUCTION,
     idempotency_key,
     parse_hook_input,
     run_guard,
@@ -205,10 +206,44 @@ def test_non_matching_commands_pass_silently_without_network(rules, command):
     assert backend.calls == []
 
 
-def test_other_tools_are_not_guarded(rules):
+@pytest.mark.parametrize("tool_name", ["Read", "Edit", "Write", "Grep", "mcp__x__y"])
+def test_non_shell_tools_are_not_guarded(rules, tool_name):
     backend = FakeBackend()
-    result = run(backend, hook_input(tool_name="Read"), env_for(rules))
+    result = run(backend, hook_input(tool_name=tool_name), env_for(rules))
     assert result.exit_code == EXIT_ALLOW and backend.calls == []
+
+
+# --- PowerShell (on Windows the PowerShell tool is on by default and is the primary shell) ----
+
+
+def test_powershell_commands_are_guarded_like_bash(rules):
+    backend = FakeBackend(["approved"])
+    result = run(
+        backend, hook_input("./deploy.ps1 production", tool_name="PowerShell"), env_for(rules)
+    )
+    assert result.exit_code == EXIT_ALLOW
+    body = backend.posts[0]["body"]
+    assert body["action"] == ACTION
+    assert body["context"]["shell"] == "PowerShell"
+    assert body["context"]["command"] == "./deploy.ps1 production"
+
+
+def test_powershell_rejection_blocks(rules):
+    backend = FakeBackend(["rejected"])
+    result = run(backend, hook_input("git push", tool_name="PowerShell"), env_for(rules))
+    assert result.exit_code == EXIT_BLOCK and "Rejected by an approver" in result.message
+
+
+def test_unguarded_powershell_commands_pass_without_network(rules):
+    backend = FakeBackend()
+    result = run(backend, hook_input("Get-ChildItem", tool_name="PowerShell"), env_for(rules))
+    assert (result.exit_code, backend.calls) == (EXIT_ALLOW, [])
+
+
+def test_powershell_call_without_a_command_blocks(rules):
+    raw = json.dumps({"tool_name": "PowerShell", "tool_input": {}}).encode()
+    result = run(FakeBackend(), raw, env_for(rules))
+    assert result.exit_code == EXIT_BLOCK and "PowerShell tool call" in result.message
 
 
 # --- Approval -----------------------------------------------------------------------------------
@@ -227,6 +262,7 @@ def test_approved_matching_command_is_allowed(rules):
         "command": DEPLOY,
         "working_directory": CWD,
         "guard_rule": "production deploy",
+        "shell": "Bash",
         "requested_by": "Claude Code (Approval Line guard)",
     }
     # Preflight, create, then polls: the guard never schedules calls itself.
@@ -260,6 +296,7 @@ def test_unapproved_outcomes_block_with_the_request_id(rules, script, expected):
     assert expected in result.message
     assert str(backend.created["id"]) in result.message
     assert result.message.startswith("Approval Line guard: ")
+    assert result.message.endswith(STOP_INSTRUCTION)
 
 
 def test_timeout_is_bounded(rules):
@@ -548,43 +585,84 @@ def test_example_rules_are_placeholders_and_block_until_filled_in(tmp_path):
     assert result.exit_code == EXIT_BLOCK and "policy_id" in result.message
 
 
-@pytest.mark.parametrize(
-    ("command", "expected"),
-    [
-        ("./deploy.sh production", "deploy_to_production"),
-        ("cd demo && ./deploy.sh production", "deploy_to_production"),
-        ("bash deploy.sh production", "deploy_to_production"),
-        ("pwsh ./deploy.ps1 production", "deploy_to_production"),
-        ("./deploy.sh staging", None),
-        ("cat deploy.sh", None),
-        ("git push", "git_push"),
-        ("git push origin main --force", "git_push"),
-        ("git -C repo push", "git_push"),
-        ("git status && git pull", None),
-        ("echo push", None),
-        ("rm -rf build", "recursive_force_delete"),
-        ("rm -fr build", "recursive_force_delete"),
-        ("rm -r -f build", "recursive_force_delete"),
-        ("rm --recursive --force build", "recursive_force_delete"),
-        ("rm notes.txt", None),
-        ("rm -r empty_dir", None),
-    ],
-)
-def test_example_rule_patterns(tmp_path, command, expected):
+def _example_rules(tmp_path):
     text = (DEMO_TARGET / "guard-rules.example.json").read_text(encoding="utf-8")
     for placeholder in ("<DEPLOY_POLICY_ID>", "<GIT_PUSH_POLICY_ID>", "<DELETE_POLICY_ID>"):
         text = text.replace(placeholder, str(POLICY_ID))
     path = tmp_path / "rules.json"
     path.write_text(text, encoding="utf-8")
-    rule = guard.match_rule(guard.load_rules(str(path)), command)
+    return guard.load_rules(str(path))
+
+
+@pytest.mark.parametrize(
+    ("tool", "command", "expected"),
+    [
+        ("Bash", "./deploy.sh production", "deploy_to_production"),
+        ("Bash", "cd demo && ./deploy.sh production", "deploy_to_production"),
+        ("Bash", "bash deploy.sh production", "deploy_to_production"),
+        ("Bash", "./deploy.sh staging", None),
+        ("Bash", "cat deploy.sh", None),
+        ("Bash", "git push", "git_push"),
+        ("Bash", "git push origin main --force", "git_push"),
+        ("Bash", "git -C repo push", "git_push"),
+        ("Bash", "git status && git pull", None),
+        ("Bash", "echo push", None),
+        ("Bash", "rm -rf build", "recursive_force_delete"),
+        ("Bash", "rm -fr build", "recursive_force_delete"),
+        ("Bash", "rm -r -f build", "recursive_force_delete"),
+        ("Bash", "rm --recursive --force build", "recursive_force_delete"),
+        ("Bash", "rm notes.txt", None),
+        ("Bash", "rm -r empty_dir", None),
+        ("PowerShell", "./deploy.ps1 production", "deploy_to_production"),
+        ("PowerShell", r".\deploy.ps1 production", "deploy_to_production"),
+        ("PowerShell", "pwsh ./deploy.ps1 production", "deploy_to_production"),
+        ("PowerShell", r".\deploy.ps1 staging", None),
+        ("PowerShell", "git push origin main", "git_push"),
+        ("PowerShell", "Remove-Item -Recurse -Force build", "recursive_force_delete"),
+        ("PowerShell", "remove-item build -recurse", "recursive_force_delete"),
+        ("PowerShell", "rm -r build", "recursive_force_delete"),
+        ("PowerShell", "ri build -Rec", "recursive_force_delete"),
+        ("PowerShell", "Remove-Item notes.txt", None),
+        ("PowerShell", "Get-ChildItem -Recurse", None),
+    ],
+)
+def test_example_rule_patterns(tmp_path, tool, command, expected):
+    rule = guard.match_rule(_example_rules(tmp_path), command, tool)
     assert (rule.rule.action if rule else None) == expected
 
 
-def test_demo_hook_registration_blocks_on_failure_and_outlasts_the_wait():
+def test_rules_can_be_limited_to_one_shell(tmp_path):
+    path = write_rules(
+        tmp_path,
+        [
+            {
+                "pattern": "danger",
+                "tools": ["PowerShell"],
+                "policy_id": str(POLICY_ID),
+                "action": "a",
+                "summary": "s",
+            }
+        ],
+    )
+    rules = guard.load_rules(str(path))
+    assert guard.match_rule(rules, "danger", "PowerShell") is not None
+    assert guard.match_rule(rules, "danger", "Bash") is None
+
+
+@pytest.mark.parametrize("tools", [[], ["Cmd"], "Bash"])
+def test_invalid_rule_tools_block(tmp_path, tools):
+    path = write_rules(tmp_path, [{**GOOD_RULE, "tools": tools}])
+    result = run(FakeBackend(), hook_input("ls"), env_for(path))
+    assert result.exit_code == EXIT_BLOCK and "tools" in result.message
+
+
+def test_demo_hook_registration_blocks_on_failure_and_outlasts_the_wait(tmp_path):
     settings = json.loads((DEMO_TARGET / ".claude" / "settings.json").read_text("utf-8"))
     (entry,) = settings["hooks"]["PreToolUse"]
     (hook,) = entry["hooks"]
-    assert entry["matcher"] == "Bash"
+    # Both shells: on Windows the PowerShell tool is on by default and is the primary shell.
+    assert entry["matcher"] == "Bash|PowerShell"
+    assert set(entry["matcher"].split("|")) == guard.GUARDED_TOOLS
     assert hook["type"] == "command" and hook["onFailure"] == "block"
     assert hook["args"] == ["-m", "approval_line_agents.guard"]  # exec form, no shell
     # Seconds. Covers the default wait plus the preflight and creation round trips.
@@ -593,3 +671,21 @@ def test_demo_hook_registration_blocks_on_failure_and_outlasts_the_wait():
     server = mcp["approval-line"]
     assert server["env"]["APPROVAL_LINE_API_KEY"] == "${APPROVAL_LINE_API_KEY}"  # no secret
     assert server["timeout"] > 60_000  # ms; above the wait tool's 60 s cap
+
+
+def test_pre_allowed_commands_are_exact_and_always_guarded(tmp_path):
+    """The allow rules only skip Claude Code's second prompt. Each names one exact command
+    (no wildcard) that a guard rule matches, so the hook (which runs first and whose exit 2
+    wins over allow rules) always asks a human before it runs."""
+    settings = json.loads((DEMO_TARGET / ".claude" / "settings.json").read_text("utf-8"))
+    allowed = settings["permissions"]["allow"]
+    assert allowed and set(settings["permissions"]) == {"allow"}
+    rules = _example_rules(tmp_path)
+    for entry in allowed:
+        tool, _, rest = entry.partition("(")
+        command = rest.removesuffix(")")
+        assert tool in guard.GUARDED_TOOLS and rest.endswith(")"), entry
+        assert "*" not in command, entry
+        assert command.endswith(("deploy.sh production", "deploy.ps1 production")), entry
+        rule = guard.match_rule(rules, command, tool)
+        assert rule is not None and rule.rule.action == "deploy_to_production", entry

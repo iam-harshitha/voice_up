@@ -1,6 +1,8 @@
-"""Approval Line execution guard: a Claude Code PreToolUse hook for the Bash tool.
+"""Approval Line execution guard: a Claude Code PreToolUse hook for shell commands.
 
-Claude Code runs this before every Bash command (see docs/claude-code-guard.md). A command
+Claude Code runs this before every Bash or PowerShell command (see
+docs/claude-code-guard.md; on Windows the PowerShell tool is on by default and is the
+primary shell, so guarding Bash alone would be bypassable). A command
 that matches a rule in the rules file is not run until a human approves it through
 Approval Line: the guard creates an approval request under the rule's policy (whose
 ``auto_dial`` setting makes the backend phone the approvers), waits for the
@@ -11,7 +13,9 @@ Hook contract (code.claude.com/docs/en/hooks, verified 2026-10-29):
     stdin   JSON with session_id, cwd, hook_event_name, tool_name, tool_input.command,
             tool_use_id
     exit 0  allow: the call continues through Claude Code's normal permission flow
-    exit 2  block: stderr is shown to Claude as the reason
+    exit 2  block: stderr is shown to Claude as the reason. This happens before
+            permission rules are evaluated, so an allow rule can never bypass it
+            (code.claude.com/docs/en/permissions, "Extend permissions with hooks")
 A command hook that crashes, exits with another code or times out does NOT block on its
 own, so this guard catches every failure and exits 2 itself, and the hook is registered
 with ``"onFailure": "block"`` and a timeout longer than the guard's wait.
@@ -39,7 +43,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import httpx
@@ -82,6 +86,15 @@ MAX_SUMMARY = 2000
 MAX_ACTION = 200
 SUMMARY_FIELDS = frozenset({"command", "cwd", "rule"})
 BLOCK_PREFIX = "Approval Line guard: "
+# Appended to every block so Claude relays the decision instead of looping or routing
+# around it (a retry is a new tool call: a new request and a new phone call).
+STOP_INSTRUCTION = (
+    "STOP: report this reason and the request ID to the user and wait for their "
+    "instructions. Do NOT retry this command, and do NOT look for a workaround or an "
+    "alternative command to achieve the same result."
+)
+# Shell tools whose tool_input.command is checked against the rules.
+GUARDED_TOOLS = frozenset({"Bash", "PowerShell"})
 
 
 class GuardBlockError(Exception):
@@ -106,6 +119,8 @@ class Rule(BaseModel):
     policy_id: UUID
     action: Annotated[str, Field(min_length=1, max_length=MAX_ACTION)]
     summary: Annotated[str, Field(min_length=1, max_length=MAX_SUMMARY)]
+    # Shell tools the rule applies to; default: every guarded shell.
+    tools: Annotated[list[Literal["Bash", "PowerShell"]], Field(min_length=1)] | None = None
 
     @field_validator("pattern")
     @classmethod
@@ -180,9 +195,19 @@ def load_rules(path_value: str | None) -> list[CompiledRule]:
     return [CompiledRule(rule, re.compile(rule.pattern)) for rule in parsed.rules]
 
 
-def match_rule(rules: list[CompiledRule], command: str) -> CompiledRule | None:
-    """First rule whose pattern is found anywhere in the command."""
-    return next((rule for rule in rules if rule.regex.search(command)), None)
+def match_rule(
+    rules: list[CompiledRule], command: str, tool_name: str = "Bash"
+) -> CompiledRule | None:
+    """First rule for this shell whose pattern is found anywhere in the command."""
+    return next(
+        (
+            rule
+            for rule in rules
+            if (rule.rule.tools is None or tool_name in rule.rule.tools)
+            and rule.regex.search(command)
+        ),
+        None,
+    )
 
 
 # --- Hook input ------------------------------------------------------------------------------
@@ -285,6 +310,7 @@ def build_request(rule: CompiledRule, hook: HookInput) -> GuardRequest:
         "command": command_text,
         "working_directory": cwd_text,
         "guard_rule": rule.label,
+        "shell": hook.tool_name,
         "requested_by": "Claude Code (Approval Line guard)",
     }
     if command_truncated:
@@ -368,8 +394,8 @@ def _outcome_message(outcome: Outcome, status: ApprovalStatus | None, timeout: f
             "reapproval_required": " A condition was met but the approver must re-approve.",
         }.get(reason, "")
         return (
-            f"No decision before the timeout ({timeout:g} s).{detail} The command was not run; "
-            "ask the user before trying again (a retry creates a new request and a new call)."
+            f"No decision before the timeout ({timeout:g} s).{detail} The command was not "
+            "run. A retry would create a new request and phone the approver again."
         )
     if outcome is Outcome.MALFORMED:
         return "Approval Line returned an untrustworthy answer. The command was not run."
@@ -388,12 +414,12 @@ async def run_guard(
     request_id: UUID | None = None
     try:
         hook = parse_hook_input(raw_input)
-        if hook.tool_name != "Bash":
-            return GuardResult(EXIT_ALLOW)  # only Bash commands are guarded
+        if hook.tool_name not in GUARDED_TOOLS:
+            return GuardResult(EXIT_ALLOW)  # only shell commands are guarded
         if hook.command is None:
-            raise GuardBlockError("the Bash tool call has no command to check.")
+            raise GuardBlockError(f"the {hook.tool_name} tool call has no command to check.")
         rules = load_rules(env.get(ENV_RULES))
-        rule = match_rule(rules, hook.command)
+        rule = match_rule(rules, hook.command, hook.tool_name)
         if rule is None:
             return GuardResult(EXIT_ALLOW)  # not guarded: no network call
 
@@ -448,7 +474,7 @@ async def run_guard(
 
 def _blocked(message: str, request_id: UUID | None, warnings: list[str]) -> GuardResult:
     suffix = f" (approval request {request_id})" if request_id else ""
-    return GuardResult(EXIT_BLOCK, f"{BLOCK_PREFIX}{message}{suffix}", warnings)
+    return GuardResult(EXIT_BLOCK, f"{BLOCK_PREFIX}{message}{suffix}\n{STOP_INSTRUCTION}", warnings)
 
 
 def main() -> int:

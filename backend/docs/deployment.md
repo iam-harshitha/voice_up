@@ -39,6 +39,17 @@ Inject everything through your platform's secret manager. Keep `deploy/.env.prod
 | `VOICE_PROVIDER` | `bolna` or `disabled`. `mock` is refused in production. |
 | `BOLNA_API_KEY`, `BOLNA_AGENT_ID`, `VOICE_WEBHOOK_TOKEN` (32+ characters) | Required with `bolna`. **Secrets.** |
 | `BOLNA_API_BASE_URL` | Must be `https://`. |
+| `BOLNA_EXTRACTION_CATEGORY`, `BOLNA_DECISION_EXTRACTION` | **Set both** to the names in the Bolna agent's Extractions tab, exactly (case- and space-sensitive). The live agent uses `Decision` and `Approval`. The code defaults are the reverse (`Approval` / `Decision`), and a mismatch fails closed: no vote is ever recorded and every call ends `identity_not_confirmed`. |
+| `BOLNA_IDENTITY_EXTRACTION`, `BOLNA_CONDITION_EXTRACTION` | Defaults `Identity Confirmed` and `Condition`; set only if the agent uses other names. |
+| `BOLNA_FROM_PHONE_NUMBER` | Optional caller ID (a number bought in the Bolna account); empty uses the account default. |
+| `VOICE_MIN_DECISION_CONFIDENCE` | Default `0.8`. Identity and decision confidence below this is no decision. |
+| `VOICE_RECONCILE_AFTER_SECONDS` | Default `600` (minimum 30). How long a call may go without a final webhook before the worker polls Bolna for it. Lower it (e.g. `120`) for demos. Must stay below `VOICE_CALL_TIMEOUT_SECONDS` (default 3600). |
+| `VOICE_MAX_CALL_GENERATIONS` | Default `3`: call attempts per approver per request, the first included. |
+| `VOICE_HTTP_TIMEOUT_SECONDS`, `VOICE_JOB_*`, `VOICE_RETRY_*`, `VOICE_WORKER_POLL_SECONDS`, `VOICE_WEBHOOK_MAX_BYTES` | Tuning; the defaults in `backend/.env.example` suit a single worker. `VOICE_JOB_LEASE_SECONDS` must be at least 4x `VOICE_HTTP_TIMEOUT_SECONDS`. |
+
+The worker needs the same voice settings as the API. Policies with `auto_dial` on schedule
+calls when a request is created (`voice-bolna.md`, "Auto-dial"); the agent's key never needs
+a voice scope.
 
 **Settings the API refuses to start with** in production (each is tested in `tests/unit/test_dashboard_security.py`):
 - `VOICE_PROVIDER=mock`;
@@ -119,5 +130,5 @@ Without Docker, `npm test` in `frontend/` runs static checks of these files (`sr
 2. Set up DNS and a TLS certificate on the terminator.
 3. Store the secrets in the platform's secret manager.
 4. Configure Bolna: an agent with the extractions, and the webhook URL plus token header (`voice-bolna.md`). Ideally restrict the webhook to Bolna's IPs at the edge.
-5. Run the live Bolna checklist with a consented test phone before relying on real calls.
+5. Run the live Bolna checklist (`voice-bolna.md`) with a consented test phone before relying on real calls. One live approval call passed on 2026-10-28 on a local tunnel; rejection, "not sure" and no-answer are verified with the mock only.
 6. Recommended hardening: run migrations as a separate owner role, and give the runtime role only `SELECT, INSERT` on `audit_events`, `request_approvers` and `escalation_steps` (see `policies.md`).

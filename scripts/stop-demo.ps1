@@ -32,4 +32,7 @@ foreach ($entry in $state.PSObject.Properties) {
     }
 }
 Remove-Item $StateFile
+# The quick tunnel's URL dies with it; never let the doctor read a stale one.
+$TunnelUrlFile = Join-Path $Root ".demo\tunnel-url.txt"
+if (Test-Path $TunnelUrlFile) { Remove-Item $TunnelUrlFile }
 Write-Host "Demo stopped. Logs remain in .demo\logs\."

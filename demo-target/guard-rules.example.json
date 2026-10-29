@@ -2,7 +2,7 @@
   "rules": [
     {
       "name": "production deploy",
-      "pattern": "(^|[\\s;&|(])(\\./)?deploy\\.(sh|ps1|cmd)\\s+production\\b",
+      "pattern": "(^|[\\s;&|(])(\\.[/\\\\])?deploy\\.(sh|ps1|cmd)\\s+production\\b",
       "policy_id": "<DEPLOY_POLICY_ID>",
       "action": "deploy_to_production",
       "summary": "Claude Code wants to deploy to production by running: {command} (in {cwd})."
@@ -16,7 +16,16 @@
     },
     {
       "name": "recursive force delete",
+      "tools": ["Bash"],
       "pattern": "\\brm\\s+(-[a-zA-Z]*[rR][a-zA-Z]*[fF]|-[a-zA-Z]*[fF][a-zA-Z]*[rR]|(-[rR]|--recursive)\\s+(-f|--force)|(-f|--force)\\s+(-[rR]|--recursive))\\b",
+      "policy_id": "<DELETE_POLICY_ID>",
+      "action": "recursive_force_delete",
+      "summary": "Claude Code wants to permanently delete files by running: {command} (in {cwd})."
+    },
+    {
+      "name": "recursive delete (PowerShell)",
+      "tools": ["PowerShell"],
+      "pattern": "(?i)(^|[\\s;&|(])(remove-item|ri|rm|del|erase|rd|rmdir)\\b[^;&|]*\\s-r(e|ec|ecu|ecur|ecurs|ecurse)?\\b",
       "policy_id": "<DELETE_POLICY_ID>",
       "action": "recursive_force_delete",
       "summary": "Claude Code wants to permanently delete files by running: {command} (in {cwd})."

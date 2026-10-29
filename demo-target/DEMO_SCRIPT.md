@@ -9,7 +9,10 @@
 - **Claude Code:** a PowerShell window in `D:\voice_up\demo-target` with the three
   `APPROVAL_LINE_*` variables set. `claude` is started there, and `/hooks` shows the guard.
 - **Screen:** the dashboard is open in a browser beside Claude Code, on the request list.
-- **Rehearsal:** do one approve and one reject end to end. Then delete `output/*.json`.
+- **Preflight:** run `..\scripts\demo-doctor.ps1` in the Claude Code window; the verdict must
+  be `READY` (read-only, no calls).
+- **Rehearsal:** work through `REHEARSAL.md` (at least approve and reject end to end). Then
+  delete `output/*.json`.
 
 ---
 
@@ -54,7 +57,8 @@ On the call:
 > command*."
 
 The judges see the request turn **approved** in the dashboard, then the command run in
-Claude Code (approve Claude Code's own prompt if it shows one), and
+Claude Code with no second prompt (the exact deploy command is pre-allowed, and the guard
+always runs before that rule), and
 `output/deploy-production-*.json` appear.
 
 **2:00 to 2:40 The reverse: rejection**
@@ -90,7 +94,8 @@ automatically by policy, call initiated, spoken decision accepted, request appro
 | "No decision before the timeout" | The call wasn't answered in time, or the answer was unclear (e.g. "I'm not sure"). Say "an unclear answer is never treated as approval", then ask Claude again. |
 | "has auto-dial off" | The policy's auto-dial is off. Tick **Auto-dial approvers** in the dashboard and retry. |
 | Every command is blocked, even `ls` | The rules file is missing or still has placeholders: check `APPROVAL_LINE_GUARD_RULES` and `guard-rules.json`. |
-| The approval came through but the command didn't run | Claude Code's own permission prompt is waiting: approve it on screen. |
+| The approval came through but the command didn't run | For the deploy, the pre-allow rule only applies in a trusted folder: accept the workspace trust dialog. For other commands Claude Code's normal prompt is waiting: approve it on screen. |
+| Claude tries the command again, or a different one, after a block | It shouldn't (`CLAUDE.md` and the block message both say stop). Press Esc and say: "It stopped because a human said no; that's the point." |
 
 **Mock backup (no network, no phone):**
 1. Before the demo, run the API and worker with `VOICE_PROVIDER=mock`.

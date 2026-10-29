@@ -1,8 +1,15 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(./deploy.sh production)",
+      "PowerShell(./deploy.ps1 production)",
+      "PowerShell(.\\deploy.ps1 production)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [
           {
             "type": "command",

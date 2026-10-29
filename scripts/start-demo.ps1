@@ -12,20 +12,27 @@
       additive; nothing is ever dropped or reset);
     - starts the processes hidden, logs to .demo/logs, and records ONLY their PIDs in
       .demo/processes.json so scripts/stop-demo.ps1 stops exactly those and nothing else;
-    - waits for the API readiness endpoint and the dashboard.
+    - waits for the API readiness endpoint and the dashboard;
+    - with VOICE_PROVIDER=bolna, starts a Cloudflare quick tunnel to the API (unless
+      -NoTunnel), waits until it serves /health/ready, saves its URL to
+      .demo/tunnel-url.txt (read by scripts/demo-doctor.ps1) and prints the webhook URL to
+      paste into Bolna. A quick tunnel gets a NEW URL every time it starts.
 
   The MCP server and demo agent are started per run (see backend/docs/demo-runbook.md).
+  Run scripts\demo-doctor.ps1 afterwards for a read-only go/no-go check.
 
 .EXAMPLE
   .\scripts\start-demo.ps1 -Migrate
   .\scripts\start-demo.ps1 -ApiPort 8001 -WebPort 5174 -SkipWorker
+  .\scripts\start-demo.ps1 -NoTunnel
 #>
 [CmdletBinding()]
 param(
     [int]$ApiPort = 8000,
     [int]$WebPort = 5173,
     [switch]$Migrate,
-    [switch]$SkipWorker
+    [switch]$SkipWorker,
+    [switch]$NoTunnel
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +43,7 @@ $Python = Join-Path $Root "env\Scripts\python.exe"
 $StateDir = Join-Path $Root ".demo"
 $LogDir = Join-Path $StateDir "logs"
 $StateFile = Join-Path $StateDir "processes.json"
+$TunnelUrlFile = Join-Path $StateDir "tunnel-url.txt"
 
 function Fail([string]$Message) {
     Write-Host "ERROR: $Message" -ForegroundColor Red
@@ -95,7 +103,10 @@ switch ($config.voice_provider) {
             Write-Host "  >> WARNING: voice-simulate needs VOICE_WEBHOOK_TOKEN and VOICE_MOCK_STATE_DIR in backend\.env." -ForegroundColor Yellow
         }
     }
-    "bolna" { Write-Host "  >> REAL VOICE: Bolna places real phone calls (live integration not yet verified)." -ForegroundColor Magenta }
+    "bolna" {
+        Write-Host "  >> REAL VOICE: Bolna places real phone calls to the approvers' numbers." -ForegroundColor Magenta
+        Write-Host "     One live approval call was verified on 2026-10-28; other paths are mock-verified. Run scripts\demo-doctor.ps1 before presenting." -ForegroundColor Magenta
+    }
     default { Write-Host "  >> Voice calls disabled." }
 }
 
@@ -177,10 +188,61 @@ if (-not (Wait-Url "http://127.0.0.1:$WebPort/" 90)) {
     exit 1
 }
 
+# --- Public tunnel for Bolna's webhooks ----------------------------------------------------------
+$tunnelUrl = $null
+if ($config.voice_provider -eq "bolna" -and -not $NoTunnel) {
+    $cloudflared = (Get-Command cloudflared -ErrorAction SilentlyContinue).Source
+    if (-not $cloudflared) {
+        foreach ($candidate in @("${env:ProgramFiles(x86)}\cloudflared\cloudflared.exe", "$env:ProgramFiles\cloudflared\cloudflared.exe")) {
+            if ($candidate -and (Test-Path $candidate)) { $cloudflared = $candidate; break }
+        }
+    }
+    if (-not $cloudflared) {
+        Write-Host "WARNING: cloudflared not found; Bolna cannot reach this API. Install it or start your own tunnel (-NoTunnel)." -ForegroundColor Yellow
+    } else {
+        $others = @(Get-Process cloudflared -ErrorAction SilentlyContinue)
+        if ($others.Count -gt 0) {
+            Write-Host ("NOTE: {0} cloudflared process(es) were already running (PID {1}); they are left alone. Bolna must use the URL printed below." -f $others.Count, ($others.Id -join ", ")) -ForegroundColor Yellow
+        }
+        $tunnelLog = Join-Path $LogDir "tunnel.err.log"
+        $tunnel = Start-Process -FilePath $cloudflared -WindowStyle Hidden -PassThru `
+            -ArgumentList @("tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:$ApiPort") `
+            -RedirectStandardOutput (Join-Path $LogDir "tunnel.out.log") -RedirectStandardError $tunnelLog
+        $started["tunnel"] = $tunnel.Id
+        $started | ConvertTo-Json | Set-Content -Encoding utf8 $StateFile
+
+        $deadline = (Get-Date).AddSeconds(45)
+        while (-not $tunnelUrl -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+            if (Test-Path $tunnelLog) {
+                # Not api.trycloudflare.com, which appears in cloudflared's own error lines.
+                $match = Select-String -Path $tunnelLog -Pattern "https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($match) { $tunnelUrl = $match.Matches[0].Value }
+            }
+        }
+        if (-not $tunnelUrl) {
+            Write-Host "WARNING: the tunnel did not report a URL within 45 s; see .demo\logs\tunnel.err.log." -ForegroundColor Yellow
+        } elseif (-not (Wait-Url "$tunnelUrl/api/v1/health/ready" 60)) {
+            Write-Host "WARNING: $tunnelUrl does not serve the API yet (DNS can take a minute). Re-check with scripts\demo-doctor.ps1." -ForegroundColor Yellow
+            Set-Content -Encoding utf8 -NoNewline -Path $TunnelUrlFile -Value $tunnelUrl
+        } else {
+            Set-Content -Encoding utf8 -NoNewline -Path $TunnelUrlFile -Value $tunnelUrl
+        }
+    }
+}
+
 Write-Host ""
 Write-Host "Approval Line demo is running:" -ForegroundColor Green
 Write-Host "  API        http://127.0.0.1:$ApiPort/api/v1/health/ready   (PID $($started['api']))"
 if ($started.Contains("worker")) { Write-Host "  Worker     PID $($started['worker'])" } else { Write-Host "  Worker     reusing the already-running worker" }
 Write-Host "  Dashboard  http://127.0.0.1:$WebPort/   (PID $($started['web']))"
+if ($started.Contains("tunnel")) { Write-Host "  Tunnel     $(if ($tunnelUrl) { $tunnelUrl } else { '(no URL yet)' })   (PID $($started['tunnel']))" }
 Write-Host "  Logs       .demo\logs\"
+if ($tunnelUrl) {
+    Write-Host ""
+    Write-Host "Paste this webhook URL into Bolna (agent > Extractions > Webhook URL), then Save agent:" -ForegroundColor Cyan
+    Write-Host "  $tunnelUrl/api/v1/voice/webhooks/bolna" -ForegroundColor Cyan
+    Write-Host "  (A quick tunnel's URL changes on every start; the header X-Approval-Line-Webhook-Token stays the same.)"
+}
+Write-Host "Check readiness:  .\scripts\demo-doctor.ps1"
 Write-Host "Stop with:  .\scripts\stop-demo.ps1"
