@@ -22,6 +22,7 @@ from tests.helpers import create_approver, create_request, make_policy
 pytestmark = pytest.mark.integration
 
 BACKEND = Path(__file__).resolve().parents[2]
+SHIPPED_HOOK_SETTINGS = BACKEND.parent / "demo-target" / ".claude" / "settings.json"
 _spec = importlib.util.spec_from_file_location(
     "demo_doctor", BACKEND / "scripts" / "demo_doctor.py"
 )
@@ -98,6 +99,7 @@ def world(client, make_tenant, test_settings, tmp_path, monkeypatch):
         )
 
     write_rules(policy["id"])
+    demo_dir = hermetic_demo_dir(tmp_path)
     env = {
         "APPROVAL_LINE_API_URL": "http://127.0.0.1:8000",
         "APPROVAL_LINE_API_KEY": tenant.keys["guard"],
@@ -114,6 +116,7 @@ def world(client, make_tenant, test_settings, tmp_path, monkeypatch):
                 claude_output=lambda: version,
                 workers=lambda: workers,
                 settings=bolna_settings(test_settings),
+                demo_dir=demo_dir,
             )
         output = doctor.render(report)
         for secret in (tenant.keys["guard"], WEBHOOK_TOKEN, BOLNA_KEY, PHONE):
@@ -130,6 +133,23 @@ def world(client, make_tenant, test_settings, tmp_path, monkeypatch):
     }
 
 
+def hermetic_demo_dir(tmp_path):
+    """A copy of the shipped hook settings whose interpreter is the one running the tests.
+
+    The shipped hook points at ../env/Scripts/python.exe, which exists only on a Windows
+    machine with the repo's virtualenv (not on CI). Matcher, timeout and onFailure stay as
+    shipped; the doctor runs the interpreter, so it must be able to import the guard.
+    """
+    settings = json.loads(SHIPPED_HOOK_SETTINGS.read_text(encoding="utf-8"))
+    for entry in settings["hooks"]["PreToolUse"]:
+        for hook in entry["hooks"]:
+            hook["command"] = sys.executable
+    demo_dir = tmp_path / "demo-target"
+    (demo_dir / ".claude").mkdir(parents=True)
+    (demo_dir / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+    return demo_dir
+
+
 def status_of(report, name_prefix):
     return [c.status for c in report.checks if c.name.startswith(name_prefix)]
 
@@ -139,6 +159,8 @@ def test_a_ready_setup_passes(world, session):
     report, output, network = world["run"]()
     assert report.ready, output
     assert "Verdict: READY" in output
+    assert status_of(report, "Hook python path") == ["PASS"]
+    assert status_of(report, "Hook python imports the guard") == ["PASS"]
     assert status_of(report, "Policy ") == ["PASS"]
     assert status_of(report, "Agent key scopes") == ["PASS"]
     assert status_of(report, "Bolna webhook URL") == ["PASS"]
