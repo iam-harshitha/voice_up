@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
 
 from app.api.dependencies import DbSession, OrganizationContext, PageParams, require_scope
 from app.api.v1.presenters import request_read, request_summary
@@ -15,7 +15,7 @@ from app.schemas.request import (
     RequestStats,
     RequestStatusCounts,
 )
-from app.services import approval_service
+from app.services import approval_service, voice_service
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -49,11 +49,19 @@ def create_request(
     body: ApprovalRequestCreate,
     org: CanCreate,
     session: DbSession,
+    http_request: Request,
     response: Response,
     idempotency_key: IdempotencyKey = None,
 ) -> ApprovalRequestRead:
+    settings = http_request.app.state.settings
+    # Policies with auto_dial schedule their calls server-side, in the creation
+    # transaction, so the agent's key never needs voice:calls:create.
     request, created = approval_service.submit_request(
-        session, org.organization_id, body, idempotency_key=idempotency_key
+        session,
+        org.organization_id,
+        body,
+        idempotency_key=idempotency_key,
+        on_created=lambda db, new, policy: voice_service.auto_dial(db, settings, new, policy),
     )
     if not created:
         response.status_code = status.HTTP_200_OK

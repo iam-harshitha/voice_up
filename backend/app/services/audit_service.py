@@ -35,6 +35,8 @@ class AuditEventType(StrEnum):
     POLICY_CREATED = "policy.created"
     POLICY_UPDATED = "policy.updated"
     VOICE_CALL_SCHEDULED = "voice.call_scheduled"
+    VOICE_AUTO_DIAL_SCHEDULED = "voice.auto_dial_scheduled"
+    VOICE_AUTO_DIAL_FAILED = "voice.auto_dial_failed"
     VOICE_CALL_INITIATION_ATTEMPTED = "voice.call_initiation_attempted"
     VOICE_CALL_INITIATED = "voice.call_initiated"
     VOICE_CALL_FAILED = "voice.call_failed"

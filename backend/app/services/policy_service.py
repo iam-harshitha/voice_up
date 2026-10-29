@@ -311,7 +311,10 @@ def create_policy(
     with transaction(session):
         primaries, backups = _validate_config(session, organization_id, config)
         policy = ApprovalPolicy(
-            organization_id=organization_id, name=data.name, description=data.description
+            organization_id=organization_id,
+            name=data.name,
+            description=data.description,
+            auto_dial=data.auto_dial,
         )
         _apply_config(policy, config)
         policy.approver_links = _links(organization_id, config, primaries, backups)
@@ -325,6 +328,7 @@ def create_policy(
             data={
                 "version": policy.version,
                 "actor_api_key_id": _actor(actor_api_key_id),
+                "auto_dial": policy.auto_dial,
                 **_config_data(config),
             },
         )
@@ -374,7 +378,7 @@ def update_policy(
         policy = get_policy(session, organization_id, policy_id, lock="update")
         changed: list[str] = []
 
-        for field in ("name", "description", "is_active"):
+        for field in ("name", "description", "is_active", "auto_dial"):
             if field in supplied and getattr(policy, field) != getattr(data, field):
                 setattr(policy, field, getattr(data, field))
                 changed.append(field)
@@ -417,6 +421,7 @@ def update_policy(
                     "version": policy.version,
                     "changed_fields": changed,
                     "actor_api_key_id": _actor(actor_api_key_id),
+                    "auto_dial": policy.auto_dial,
                     **_config_data(current),
                 },
             )

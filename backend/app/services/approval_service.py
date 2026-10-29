@@ -23,6 +23,7 @@ from app.core.errors import BusinessRuleError, ConflictError, NotFoundError, Unp
 from app.db.base import utcnow
 from app.db.models import (
     ApprovalCondition,
+    ApprovalPolicy,
     ApprovalRequest,
     ApprovalVote,
     Approver,
@@ -128,12 +129,19 @@ def _replay(existing: tuple[UUID, str], fingerprint: str) -> UUID:
     return request_id
 
 
+# Runs inside the request's creation transaction, after the request and its approvers
+# exist (e.g. automatic voice calls). It must not commit; anything it writes is durable
+# iff the request is.
+OnCreated = Callable[[Session, ApprovalRequest, ApprovalPolicy], None]
+
+
 def submit_request(
     session: Session,
     organization_id: UUID,
     data: ApprovalRequestCreate,
     *,
     idempotency_key: str | None = None,
+    on_created: OnCreated | None = None,
 ) -> tuple[ApprovalRequest, bool]:
     """Create a request, or replay the one created earlier with the same key.
 
@@ -141,9 +149,10 @@ def submit_request(
     concurrent) with the same payload yield one request; the same key with a different
     payload is refused with 422. Keys are scoped to the organization and stored only as
     a SHA-256 hash. Without a key, every call creates a new request (unchanged).
+    ``on_created`` runs only when a new request is created, never for a replay.
     """
     if idempotency_key is None:
-        return create_request(session, organization_id, data), True
+        return create_request(session, organization_id, data, on_created=on_created), True
     key_hash = _sha256(idempotency_key)
     fingerprint = request_fingerprint(data)
     existing = _find_by_idempotency_key(session, organization_id, key_hash)
@@ -151,7 +160,11 @@ def submit_request(
         return get_request(session, organization_id, _replay(existing, fingerprint)), False
     try:
         request = create_request(
-            session, organization_id, data, idempotency=(key_hash, fingerprint)
+            session,
+            organization_id,
+            data,
+            idempotency=(key_hash, fingerprint),
+            on_created=on_created,
         )
     except IntegrityError as exc:
         # A concurrent call with the same key won the race. Its transaction committed;
@@ -171,6 +184,7 @@ def create_request(
     data: ApprovalRequestCreate,
     *,
     idempotency: tuple[str, str] | None = None,
+    on_created: OnCreated | None = None,
 ) -> ApprovalRequest:
     now = utcnow()
     with transaction(session):
@@ -272,9 +286,13 @@ def create_request(
                 "expires_at": expires_at.isoformat() if expires_at else None,
                 "escalation_after_seconds": snapshot["escalation_after_seconds"],
                 "max_escalations": snapshot["max_escalations"],
+                "auto_dial": policy.auto_dial,
                 "action": data.action,
             },
         )
+        if on_created is not None:
+            session.flush()  # the hook sees the request with its approvers persisted
+            on_created(session, request, policy)
         request_id = request.id
     return get_request(session, organization_id, request_id)
 

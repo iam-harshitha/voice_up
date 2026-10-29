@@ -17,7 +17,10 @@ const REQUIRED_HEADERS = [
 ];
 
 function stripComments(text: string): string {
+  // Normalise CRLF (a Windows checkout with core.autocrlf): `.` does not match "\r", so
+  // `#.*$` would otherwise leave every comment in place.
   return text
+    .replace(/\r\n/g, "\n")
     .split("\n")
     .map((line) => line.replace(/#.*$/, ""))
     .join("\n");

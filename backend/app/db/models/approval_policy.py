@@ -72,6 +72,9 @@ class ApprovalPolicy(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     # Seconds between escalation rounds for undecided seats (NULL = no escalation).
     escalation_after_seconds: Mapped[int | None]
     max_escalations: Mapped[int] = mapped_column(SmallInteger, default=0, server_default="0")
+    # Opt-in: schedule the approvers' voice calls when a request is created under this
+    # policy (instead of waiting for an explicit "Schedule calls").
+    auto_dial: Mapped[bool] = mapped_column(default=False, server_default=false())
     is_active: Mapped[bool] = mapped_column(default=True, server_default=true())
     version: Mapped[int] = mapped_column(default=1, server_default="1")
     updated_at: Mapped[datetime] = mapped_column(

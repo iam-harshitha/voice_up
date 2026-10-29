@@ -32,6 +32,7 @@ export interface PolicyFormValues {
   deadline_minutes: string;
   escalation_minutes: string;
   max_escalations: string;
+  auto_dial: boolean;
 }
 
 export const EMPTY_POLICY: PolicyFormValues = {
@@ -46,6 +47,7 @@ export const EMPTY_POLICY: PolicyFormValues = {
   deadline_minutes: "",
   escalation_minutes: "",
   max_escalations: "",
+  auto_dial: false,
 };
 
 function fromPolicy(p: Policy): PolicyFormValues {
@@ -61,6 +63,7 @@ function fromPolicy(p: Policy): PolicyFormValues {
     deadline_minutes: p.decision_deadline_seconds ? String(p.decision_deadline_seconds / 60) : "",
     escalation_minutes: p.escalation_after_seconds ? String(p.escalation_after_seconds / 60) : "",
     max_escalations: p.escalation_after_seconds ? String(p.max_escalations) : "",
+    auto_dial: p.auto_dial,
   };
 }
 
@@ -133,6 +136,7 @@ export function validatePolicyForm(v: PolicyFormValues): { errors: Record<string
       decision_deadline_seconds: deadline as number | null,
       escalation_after_seconds: escalation as number | null,
       max_escalations: maxEscalations,
+      auto_dial: v.auto_dial,
     },
   };
 }
@@ -315,6 +319,20 @@ export function PolicyForm({
           {(props) => <input {...props} inputMode="numeric" className={inputClass} value={v.max_escalations} onChange={(e) => set("max_escalations", e.target.value)} />}
         </Field>
       </div>
+      <label className="flex items-start gap-2 text-sm text-slate-800">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={v.auto_dial}
+          onChange={(e) => set("auto_dial", e.target.checked)}
+        />
+        <span>
+          Auto-dial approvers
+          <span className="block text-xs text-slate-500">
+            Call the approvers as soon as a request is created under this policy, instead of waiting for “Schedule calls”.
+          </span>
+        </span>
+      </label>
       <p className="text-xs text-slate-500">
         Conditions always require the approver’s fresh, unconditional re-approval; that rule is not configurable.
       </p>
@@ -370,6 +388,7 @@ function PolicyDetail({ policy, onChanged }: { policy: Policy; onChanged: () => 
     ["Backups", policy.backup_approvers.map((a) => a.name).join(", ") || "None"],
     ["Deadline", formatDuration(policy.decision_deadline_seconds)],
     ["Escalation", policy.escalation_after_seconds ? `Every ${formatDuration(policy.escalation_after_seconds)}, up to ${policy.max_escalations} step(s)` : "None"],
+    ["Auto-dial", policy.auto_dial ? "On: approvers are called when a request is created" : "Off: calls are scheduled manually"],
     ["Updated", formatDateTime(policy.updated_at)],
   ];
 

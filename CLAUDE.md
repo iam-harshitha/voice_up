@@ -97,7 +97,10 @@ Invariants that span several files:
   business change and their own job completion/rescheduling in ONE transaction (lock
   order: job row, then request). The worker runs them even with voice disabled.
 - All call creation goes through `voice_service.create_call` (generation limits,
-  duplicate-call guard), used by scheduling, escalation and re-approval.
+  duplicate-call guard), used by scheduling, escalation and re-approval. Auto-dial
+  (policy `auto_dial`, default false) reuses the scheduling path via
+  `approval_service.create_request`'s `on_created` hook, inside the creation
+  transaction, so replays never dial; with the default, filing a request never dials.
 - **Audit events:** insert-only through `services/audit_service.record_event`, in the
   caller's transaction. A DB trigger blocks UPDATE/DELETE. Order timelines by
   `sequence`, not `created_at`, because events in one transaction can share a timestamp.

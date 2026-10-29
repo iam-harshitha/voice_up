@@ -156,10 +156,10 @@ An agent key should have only `requests:create,requests:read`. It must never hol
 | `POST /approvers` | approvers:write | `name` + `phone_number` (E.164) and/or `email` |
 | `GET /approvers`, `GET /approvers/{id}` | approvers:read | paginated |
 | `PATCH /approvers/{id}` | approvers:write | incl. `is_active` |
-| `POST /policies` | policies:write | `required_approvals` 1 or 2 + exactly that many distinct active approvers |
+| `POST /policies` | policies:write | `required_approvals` 1 or 2 + exactly that many distinct active approvers; optional `auto_dial` (default `false`: call the approvers automatically when a request is created, see docs/voice-bolna.md) |
 | `GET /policies`, `GET /policies/{id}` | policies:read | `?is_active=` filter |
 | `PATCH /policies/{id}` | policies:write | any change bumps `version` |
-| `POST /requests` | requests:create | `policy_id`, `action`, `summary`, `context` (object, ≤16 KB); optional `Idempotency-Key` header (8–128 chars): a retry returns the original (200, `Idempotent-Replayed: true`), the same key with a different payload returns 422 `idempotency_key_reused` |
+| `POST /requests` | requests:create | `policy_id`, `action`, `summary`, `context` (object, ≤16 KB); optional `Idempotency-Key` header (8–128 chars): a retry returns the original (200, `Idempotent-Replayed: true`), the same key with a different payload returns 422 `idempotency_key_reused`. Under an `auto_dial` policy the approvers' calls are scheduled in the same transaction (never on a replay) |
 | `GET /requests`, `GET /requests/{id}` | requests:read | `?status=pending\|approved\|rejected\|expired`, `?include_evaluation=true`; detail includes `evaluation`, `expires_at`, snapshot `policy` and named `approvers` |
 | `GET /requests/stats` | requests:read | exact counts by status, plus engine-derived condition/re-approval/deadline counts (bounded; see `evaluation_complete`) |
 | `GET /audit-events/recent` | audit:read | newest organization events, `?limit≤50` |

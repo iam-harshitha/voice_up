@@ -34,6 +34,12 @@ describe("policy form validation", () => {
     expect(payload).toBeNull();
   });
 
+  it("sends auto_dial explicitly, off by default", () => {
+    expect(EMPTY_POLICY.auto_dial).toBe(false);
+    expect(validatePolicyForm(policy({ approver_ids: [A] })).payload).toMatchObject({ auto_dial: false });
+    expect(validatePolicyForm(policy({ approver_ids: [A], auto_dial: true })).payload).toMatchObject({ auto_dial: true });
+  });
+
   it("converts minutes to seconds and keeps veto holders only for designated mode", () => {
     const { payload } = validatePolicyForm(
       policy({

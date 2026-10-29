@@ -73,6 +73,8 @@ class PolicyCreate(StrictInput):
     decision_deadline_seconds: DeadlineSeconds | None = None
     escalation_after_seconds: EscalationSeconds | None = None
     max_escalations: Annotated[int, Field(ge=0, le=3)] | None = None
+    # Opt-in: schedule the approvers' calls automatically when a request is created.
+    auto_dial: bool = False
 
 
 class PolicyUpdate(StrictInput):
@@ -89,6 +91,7 @@ class PolicyUpdate(StrictInput):
     decision_deadline_seconds: DeadlineSeconds | None = None
     escalation_after_seconds: EscalationSeconds | None = None
     max_escalations: Annotated[int, Field(ge=0, le=3)] | None = None
+    auto_dial: bool | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> Self:
@@ -97,6 +100,7 @@ class PolicyUpdate(StrictInput):
         for field in (
             "name",
             "is_active",
+            "auto_dial",
             "approval_mode",
             "required_approvals",
             "approver_ids",
@@ -131,5 +135,6 @@ class PolicyRead(ApiOutput):
     decision_deadline_seconds: int | None
     escalation_after_seconds: int | None
     max_escalations: int
+    auto_dial: bool
     created_at: datetime
     updated_at: datetime

@@ -21,6 +21,7 @@ action, and only the action in that request.** Approval Line never executes anyt
 | `decision_deadline_seconds` | 60 s – 30 days, or null | A pending request expires this long after creation. Null means no deadline. |
 | `escalation_after_seconds` | 60 s – 7 days, or null | Interval between escalation rounds. Requires backups, and must be shorter than the deadline. |
 | `max_escalations` | 1 – number of backups (0 when no escalation) | Total escalation steps per request. Defaults to the number of backups. |
+| `auto_dial` | `false` (default), `true` | Schedule the approvers' voice calls automatically when a request is created (see `voice-bolna.md`, "Auto-dial"). Not an authorization rule, but a change still bumps `version`. |
 
 All fields default to Chunk 1 behaviour, so existing policies and clients are unchanged.
 Every authorization-relevant change bumps `version` and writes a `policy.updated` audit

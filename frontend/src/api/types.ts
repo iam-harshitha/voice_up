@@ -216,6 +216,7 @@ export interface Policy {
   decision_deadline_seconds: number | null;
   escalation_after_seconds: number | null;
   max_escalations: number;
+  auto_dial: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -232,4 +233,5 @@ export interface PolicyInput {
   decision_deadline_seconds: number | null;
   escalation_after_seconds: number | null;
   max_escalations?: number | null;
+  auto_dial: boolean;
 }

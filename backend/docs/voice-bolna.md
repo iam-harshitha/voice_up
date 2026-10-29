@@ -17,6 +17,7 @@ assumed.
 
 ```
 agent ── POST /requests ──▶ request (pending, policy snapshot)
+         └─ policy.auto_dial = true ──▶ voice_calls + voice_jobs, same transaction
 operator ── POST /requests/{id}/voice-calls ──▶ voice_calls + voice_jobs (one per approver)
 worker ── claims job (SKIP LOCKED, leased) ──▶ Bolna POST /call ──▶ phone rings
 Bolna ── webhook on each status change ──▶ /api/v1/voice/webhooks/bolna ──▶ inbox row
@@ -193,9 +194,40 @@ Extractions tab shows. A mismatch fails closed: every call ends `identity_not_co
    `provider_message` on `voice.call_initiation_rejected`.
 6. **Server:** set `VOICE_PROVIDER=bolna`, restart the API (from `backend/`, so it reads
    `backend/.env`), and start the worker. Startup fails if the key, agent ID or webhook
-   token is missing. It never falls back to the mock. Calls are placed only for an
-   explicit `POST /requests/{id}/voice-calls` (or the dashboard button); creating a
-   request never dials anyone.
+   token is missing. It never falls back to the mock. By default calls are placed only
+   for an explicit `POST /requests/{id}/voice-calls` (or the dashboard's **Schedule
+   calls** button): creating a request never dials anyone, unless its policy has
+   `auto_dial` switched on (next section).
+
+### Auto-dial (opt-in per policy)
+
+A policy with `"auto_dial": true` (default `false`; set on `POST /policies` or
+`PATCH /policies/{id}`, or with the dashboard's **Auto-dial approvers** checkbox) has its
+approvers' calls scheduled as soon as a request is created under it. Changing it bumps
+the policy `version` and is recorded in `policy.updated` (`changed_fields`).
+
+- **Same code path as the button.** `voice_service.auto_dial` calls the same scheduling
+  function as `POST /requests/{id}/voice-calls`, so the duplicate-call guard, the
+  generation limit and the skipped-approver rules are identical. The call's
+  `voice.call_scheduled` event has `reason: "auto_dial"`, and one
+  `voice.auto_dial_scheduled` event records the `policy_id`, `policy_version`, the call
+  IDs and any skipped approvers.
+- **Server-side.** The agent's key needs only `requests:create`; it never needs
+  `voice:calls:create`.
+- **Exactly once.** Scheduling runs inside the request's creation transaction
+  (`approval_service.create_request`'s `on_created` hook), so the calls exist if and only
+  if the request does. An idempotent replay (same `Idempotency-Key`) returns the original
+  request without scheduling anything; a concurrent retry with the same key loses on the
+  key's unique index and rolls back entirely, calls included. A later manual "Schedule
+  calls" finds the calls and creates none. The worker still dials only queued jobs.
+- **Failures never block the request and never dial.** If scheduling fails (voice
+  disabled, no approver with a phone number, a database error), that attempt is rolled
+  back to a savepoint, the request is still created `pending`, and
+  `voice.auto_dial_failed` records the `policy_id`, `policy_version` and `reason`
+  (`voice_unavailable`, `no_callable_approvers`, `scheduling_error`, …). An operator can
+  then schedule calls manually. Nothing is retried automatically.
+- **Status: mock-verified only.** Covered by `tests/integration/test_auto_dial.py` with
+  the mock provider; no live Bolna call has been placed through auto-dial yet.
 
 ### Bolna's "Send test" button returns 400, by design
 

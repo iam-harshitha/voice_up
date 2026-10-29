@@ -1,21 +1,32 @@
 """Scheduling and reading voice approval calls (organization-scoped)."""
 
+import logging
 from dataclasses import dataclass, field
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.core.errors import BusinessRuleError, NotFoundError, ServiceUnavailableError
+from app.core.errors import AppError, BusinessRuleError, NotFoundError, ServiceUnavailableError
 from app.db.base import utcnow
-from app.db.models import ApprovalRequest, ApprovalVote, Approver, VoiceCall, VoiceJob
+from app.db.models import (
+    ApprovalPolicy,
+    ApprovalRequest,
+    ApprovalVote,
+    Approver,
+    VoiceCall,
+    VoiceJob,
+)
 from app.db.models.voice import DecisionStatus, JobType
 from app.db.session import transaction
 from app.services import audit_service
 from app.services.approval_service import require_open
 from app.services.audit_service import AuditEventType
 from app.voice.base import TERMINAL_STATUSES, CallStatus
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -156,47 +167,108 @@ def schedule_calls(
         # before any vote on this request (votes lock the request first as well).
         request = _lock_request(session, organization_id, request_id)
         require_open(request, utcnow())
+        return _schedule_locked(
+            session, settings, request, redial_unanswered=redial_unanswered, reason="scheduled"
+        )
 
-        votes = session.scalars(
-            select(ApprovalVote).where(ApprovalVote.request_id == request.id)
-        ).all()
-        already_voted = {v.approver_id for v in votes}
-        decided_seats = {v.seat_approver_id for v in votes}
-        result = ScheduleResult(calls=[], created=0)
-        for approver_id in request.authorized_approver_ids:  # snapshot order
-            previous = session.scalar(
-                select(VoiceCall)
-                .where(VoiceCall.request_id == request.id, VoiceCall.approver_id == approver_id)
-                .order_by(VoiceCall.generation.desc())
-                .limit(1)
-            )
-            if approver_id in already_voted or approver_id in decided_seats:
-                # The seat's decision is recorded; calling again could only conflict.
-                reason = "already_voted" if approver_id in already_voted else "seat_decided"
-                result.skipped.append({"approver_id": str(approver_id), "reason": reason})
-                if previous is not None:
-                    result.calls.append(previous)
-                continue
-            redial = bool(
-                redial_unanswered
-                and previous is not None
-                and previous.decision_status != DecisionStatus.ACCEPTED
-            )
-            call, skipped = create_call(
-                session, settings, request, approver_id, reason="scheduled", allow_redial=redial
-            )
-            if call is not None:
-                result.calls.append(call)
-            if skipped is None:
-                result.created += 1
-            elif skipped not in ("already_called", "call_in_progress"):
-                result.skipped.append({"approver_id": str(approver_id), "reason": skipped})
 
-        if not result.calls:
-            raise BusinessRuleError(
-                "None of the request's approvers can be called.", code="no_callable_approvers"
-            )
+def _schedule_locked(
+    session: Session,
+    settings: Settings,
+    request: ApprovalRequest,
+    *,
+    redial_unanswered: bool,
+    reason: str,
+) -> ScheduleResult:
+    """Create the calls for an open request whose row the caller has locked (or has just
+    inserted). Shared by the operator's "Schedule calls" and by auto-dial."""
+    votes = session.scalars(select(ApprovalVote).where(ApprovalVote.request_id == request.id)).all()
+    already_voted = {v.approver_id for v in votes}
+    decided_seats = {v.seat_approver_id for v in votes}
+    result = ScheduleResult(calls=[], created=0)
+    for approver_id in request.authorized_approver_ids:  # snapshot order
+        previous = session.scalar(
+            select(VoiceCall)
+            .where(VoiceCall.request_id == request.id, VoiceCall.approver_id == approver_id)
+            .order_by(VoiceCall.generation.desc())
+            .limit(1)
+        )
+        if approver_id in already_voted or approver_id in decided_seats:
+            # The seat's decision is recorded; calling again could only conflict.
+            skip = "already_voted" if approver_id in already_voted else "seat_decided"
+            result.skipped.append({"approver_id": str(approver_id), "reason": skip})
+            if previous is not None:
+                result.calls.append(previous)
+            continue
+        redial = bool(
+            redial_unanswered
+            and previous is not None
+            and previous.decision_status != DecisionStatus.ACCEPTED
+        )
+        call, skipped = create_call(
+            session, settings, request, approver_id, reason=reason, allow_redial=redial
+        )
+        if call is not None:
+            result.calls.append(call)
+        if skipped is None:
+            result.created += 1
+        elif skipped not in ("already_called", "call_in_progress"):
+            result.skipped.append({"approver_id": str(approver_id), "reason": skipped})
+
+    if not result.calls:
+        raise BusinessRuleError(
+            "None of the request's approvers can be called.", code="no_callable_approvers"
+        )
     return result
+
+
+def auto_dial(
+    session: Session, settings: Settings, request: ApprovalRequest, policy: ApprovalPolicy
+) -> None:
+    """Schedule a NEW request's calls when its policy opts in (``auto_dial``).
+
+    Runs inside the request's creation transaction (``approval_service.create_request``'s
+    ``on_created``), so the calls exist iff the request does: an idempotent replay never
+    reaches here, and a rolled-back creation leaves no calls behind. A scheduling failure
+    is rolled back to a savepoint and audited; the request is still created, pending.
+    """
+    if not policy.auto_dial:
+        return
+    audit = {"policy_id": str(policy.id), "policy_version": policy.version}
+    if settings.voice_provider == "disabled":
+        reason = "voice_unavailable"
+    else:
+        try:
+            with session.begin_nested():
+                result = _schedule_locked(
+                    session, settings, request, redial_unanswered=False, reason="auto_dial"
+                )
+        except AppError as exc:
+            reason = exc.code
+        except SQLAlchemyError:
+            logger.exception("voice.auto_dial_failed", extra={"request_id": str(request.id)})
+            reason = "scheduling_error"
+        else:
+            audit_service.record_event(
+                session,
+                organization_id=request.organization_id,
+                request_id=request.id,
+                event_type=AuditEventType.VOICE_AUTO_DIAL_SCHEDULED,
+                data={
+                    **audit,
+                    "calls_created": result.created,
+                    "voice_call_ids": [str(call.id) for call in result.calls],
+                    "skipped": result.skipped,
+                },
+            )
+            return
+    audit_service.record_event(
+        session,
+        organization_id=request.organization_id,
+        request_id=request.id,
+        event_type=AuditEventType.VOICE_AUTO_DIAL_FAILED,
+        data={**audit, "reason": reason},
+    )
 
 
 def list_calls(session: Session, organization_id: UUID, request_id: UUID) -> list[VoiceCall]:

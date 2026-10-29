@@ -113,6 +113,8 @@ const EVENT_LABEL: Record<string, string> = {
   "policy.created": "Policy created",
   "policy.updated": "Policy updated",
   "voice.call_scheduled": "Call scheduled",
+  "voice.auto_dial_scheduled": "Calls scheduled automatically (auto-dial)",
+  "voice.auto_dial_failed": "Auto-dial failed; calls not scheduled",
   "voice.call_initiation_attempted": "Call initiation attempted",
   "voice.call_initiated": "Call initiated",
   "voice.event_ignored": "Provider event ignored",
@@ -129,7 +131,12 @@ export function eventLabel(type: string): string {
 export function eventTone(type: string): "good" | "bad" | "warn" | "info" | "other" {
   if (type === "request.approved") return "good";
   if (type === "request.rejected" || type === "request.expired" || type === "voice.call_failed") return "bad";
-  if (type.startsWith("condition.") || type.startsWith("escalation.") || type === "voice.decision_rejected")
+  if (
+    type.startsWith("condition.") ||
+    type.startsWith("escalation.") ||
+    type === "voice.decision_rejected" ||
+    type === "voice.auto_dial_failed"
+  )
     return "warn";
   if (type.startsWith("request.") || type.startsWith("vote.") || type.startsWith("voice.")) return "info";
   return "other";

@@ -391,6 +391,7 @@ describe("request creation", () => {
     decision_deadline_seconds: null,
     escalation_after_seconds: null,
     max_escalations: 0,
+    auto_dial: false,
     created_at: "2026-10-24T10:00:00Z",
     updated_at: "2026-10-24T10:00:00Z",
   };
