@@ -138,11 +138,11 @@ Full setup is in [demo-target/README.md](demo-target/README.md). In short:
 
 | Part | Status |
 |---|---|
-| [`backend/`](backend/README.md): REST API, policy engine, PostgreSQL schema | Chunk 1 ✅ |
-| Bolna voice calls to approvers ([docs](backend/docs/voice-bolna.md)) | Chunk 2 ✅ live-verified with Bolna on 2026-10-29: approve, reject, unclear answer (no vote), declined call (no vote) and unconfirmed identity (no vote). Conditional answers are mock-verified only |
-| Quorum/veto, conditions, deadlines, escalation, audit timeline ([docs](backend/docs/policies.md)) | Chunk 3 ✅ mock-verified (live calls exercised single-approver policies only) |
-| [`frontend/`](frontend/README.md) dashboard (decision timeline, call evidence), MCP server, demo agent ([docs](backend/docs/dashboard-mcp.md)) | Chunk 4 ✅ mock-verified |
-| Hardening, idempotency, demo tooling, CI, deployment guide ([runbook](backend/docs/demo-runbook.md), [deploy](backend/docs/deployment.md), [security](backend/docs/security.md)) | Chunk 5 ✅ mock-verified; not deployed |
+| [`backend/`](backend/README.md): REST API, policy engine, PostgreSQL schema | ✅ |
+| Bolna voice calls to approvers ([docs](backend/docs/voice-bolna.md)) | ✅ live-verified with Bolna on 2026-10-29: approve, reject, unclear answer (no vote), declined call (no vote) and unconfirmed identity (no vote). Conditional answers are mock-verified only |
+| Quorum/veto, conditions, deadlines, escalation, audit timeline ([docs](backend/docs/policies.md)) | ✅ mock-verified (live calls exercised single-approver policies only) |
+| [`frontend/`](frontend/README.md) dashboard (decision timeline, call evidence), MCP server, demo agent ([docs](backend/docs/dashboard-mcp.md)) | ✅ mock-verified |
+| Hardening, idempotency, demo tooling, CI, deployment guide ([runbook](backend/docs/demo-runbook.md), [deploy](backend/docs/deployment.md), [security](backend/docs/security.md)) | ✅ mock-verified; not deployed |
 | Auto-dial: opt-in per policy, calls approvers as soon as a request is created ([docs](backend/docs/voice-bolna.md#auto-dial-opt-in-per-policy)) | ✅ live-verified with Bolna on 2026-10-29 |
 | Claude Code execution guard: a PreToolUse hook that blocks risky Bash and PowerShell commands until a human approves by phone ([docs](backend/docs/claude-code-guard.md), [demo](demo-target/README.md)) | ✅ live-verified on 2026-10-29 inside a Claude Code session (v2.1.312) started in `demo-target/`, with Bolna calls: an approved deploy ran and wrote its record; a rejected one was blocked, and Claude reported the reason and request ID, did not retry, and asked how to proceed. Hook input fed directly also checked: approve → exit 0, reject → exit 2 with the STOP message, non-matching command → exit 0 with no call |
 | Demo hardening: read-only preflight `scripts/demo-doctor.ps1`, tunnel start in `start-demo.ps1`, [rehearsal matrix](demo-target/REHEARSAL.md) | ✅ preflight READY against the live stack |
