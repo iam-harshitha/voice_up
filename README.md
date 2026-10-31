@@ -9,7 +9,7 @@ back `pending`, `approved`, `rejected` or `expired`, plus an `evaluation` that s
 the action is authorized. Anything other than `approved` with `authorized: true` means
 "do not run".
 
-> **Demo video:** _link coming soon_
+> **Demo video:** https://drive.google.com/file/d/1_cFl4qds9Hift4Mg6TgvyUcj252O1S7J/view?usp=drive_link
 
 ## How it works
 
