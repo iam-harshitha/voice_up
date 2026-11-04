@@ -121,6 +121,14 @@ const EVENT_LABEL: Record<string, string> = {
   "voice.call_failed": "Call failed",
   "voice.decision_accepted": "Spoken decision accepted",
   "voice.decision_rejected": "Spoken answer not accepted as a decision",
+  "voice.fallback_expedited": "Text not delivered; fallback call started now",
+  "text.prompt_sent": "Telegram message sent",
+  "text.prompt_failed": "Telegram message not sent",
+  "text.decision_accepted": "Telegram decision accepted",
+  "text.decision_rejected": "Telegram tap not accepted",
+  "channel.link_created": "Telegram account linked",
+  "channel.link_revoked": "Telegram link revoked",
+  "channel.link_rejected": "Telegram pairing refused",
 };
 
 export function eventLabel(type: string): string {
@@ -135,10 +143,21 @@ export function eventTone(type: string): "good" | "bad" | "warn" | "info" | "oth
     type.startsWith("condition.") ||
     type.startsWith("escalation.") ||
     type === "voice.decision_rejected" ||
-    type === "voice.auto_dial_failed"
+    type === "voice.auto_dial_failed" ||
+    type === "voice.fallback_expedited" ||
+    type === "text.prompt_failed" ||
+    type === "text.decision_rejected" ||
+    type === "channel.link_rejected"
   )
     return "warn";
-  if (type.startsWith("request.") || type.startsWith("vote.") || type.startsWith("voice.")) return "info";
+  if (
+    type.startsWith("request.") ||
+    type.startsWith("vote.") ||
+    type.startsWith("voice.") ||
+    type.startsWith("text.") ||
+    type.startsWith("channel.")
+  )
+    return "info";
   return "other";
 }
 
