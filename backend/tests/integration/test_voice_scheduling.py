@@ -181,7 +181,7 @@ class TestInitiation:
             c.variables for c in mock_provider.initiated if c.recipient_phone_number == ALICE_PHONE
         )
         assert variables["approver_name"] == "Alice"
-        assert variables["requested_action"] == "deploy.production"
+        assert variables["requested_action"] == "deploy production"
         assert variables["request_details"] == "service: payments-api"
         calls = list_calls(voice_client, voice_tenant, voice_request["id"])
         assert all(c["status"] == "initiated" and c["provider_call_id"] for c in calls)

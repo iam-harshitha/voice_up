@@ -579,7 +579,7 @@ def handle_tap(
                 True,
                 "confirmation_requested",
                 [
-                    AnswerCallback(tap.callback_id, "Tap 'Confirm approve' to record it."),
+                    AnswerCallback(tap.callback_id, msg.CONFIRM_NOTE),
                     EditMessage(
                         chat_id,
                         message_id,
@@ -597,7 +597,7 @@ def handle_tap(
                 True,
                 "confirmation_cancelled",
                 [
-                    AnswerCallback(tap.callback_id, "Cancelled. Nothing was recorded."),
+                    AnswerCallback(tap.callback_id, msg.CANCELLED_NOTE),
                     EditMessage(
                         chat_id, message_id, request_text, msg.first_stage_buttons(secret, fresh)
                     ),
@@ -636,9 +636,8 @@ def handle_tap(
             vote_id=str(outcome.vote.id),
             request_status=outcome.request.status,
         )
-        label = "Approved" if choice is VoteChoice.APPROVE else "Rejected"
         actions: list[Action] = [
-            AnswerCallback(tap.callback_id, f"{label}: recorded."),
+            AnswerCallback(tap.callback_id, msg.ANSWERS[choice.value]),
             *_final_edit(session, prompt, msg.OUTCOME_NOTES[choice.value]),
         ]
     logger.info(

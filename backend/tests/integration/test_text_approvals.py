@@ -168,8 +168,13 @@ def test_the_message_shows_the_sanitised_context_and_two_buttons(
     prompt = prompt_of(session, request["id"])
     stored = text_worker.provider.message(prompt.provider_message_id)
     assert stored["chat_id"] == ALICE_TG
-    assert f"Approval request {request['id'][:8].upper()}" in stored["text"]
-    assert "service: payments-api" in stored["text"] and "risk: high" in stored["text"]
+    lines = stored["text"].splitlines()
+    assert lines == [
+        "Approve: deploy production?",
+        "What: Deploy 1.4.2",
+        "Risk: high",
+        f"Ref {request['id'][:8].upper()}, expires {prompt.expires_at:%H:%M} UTC",
+    ]
     assert "sk-do-not-show" not in stored["text"]  # secret-looking keys are dropped
     assert [b["label"] for b in stored["buttons"]] == ["Approve", "Reject"]
     assert all(len(b["data"].encode()) <= 64 for b in stored["buttons"])
@@ -185,7 +190,7 @@ def test_approve_needs_a_confirmation_tap_then_approves(
     world, text_client, tenant, text_worker, session
 ):
     request_id = world["request"]["id"]
-    assert tap(text_worker, world["prompt"], "a") == "Tap 'Confirm approve' to record it."
+    assert tap(text_worker, world["prompt"], "a") == msg.CONFIRM_NOTE
     prompt = prompt_of(session, request_id)
     assert prompt.status == PromptStatus.CONFIRMING and no_vote(session, request_id)
     shown = text_worker.provider.message(prompt.provider_message_id)

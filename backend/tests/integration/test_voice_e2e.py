@@ -76,7 +76,7 @@ def test_two_approver_voice_approval_end_to_end(
     ]
     assert all(
         c.variables["request_summary"] == "Deploy payments-api v2.3.0"
-        and c.variables["risk_details"] == "risk: high"
+        and c.variables["risk_details"] == "high"
         for c in mock_provider.initiated
     )
     alice_call, bob_call = list_calls(voice_client, tenant, request["id"])
