@@ -1,7 +1,8 @@
 """Read-only preflight for the live Claude Code + Approval Line + Bolna demo.
 
-Run it from the PowerShell window you start Claude Code from (it reads the same
-APPROVAL_LINE_* variables the hook will see):
+It checks the APPROVAL_LINE_* values the hook will see: demo-target/.claude/settings.local.json
+("env", written by ``app.cli connect-claude``) wins over this window's variables, as in
+Claude Code. Run it from the window you start Claude Code from:
 
     .\\scripts\\demo-doctor.ps1            (repo root; wraps this file)
 
@@ -42,7 +43,7 @@ from sqlalchemy import text  # noqa: E402
 from sqlalchemy.engine import Connection, Engine  # noqa: E402
 
 from app.core.security import hash_api_key  # noqa: E402
-from approval_line_agents import guard  # noqa: E402
+from approval_line_agents import guard, local_config  # noqa: E402
 
 MIN_CLAUDE_VERSION = (2, 1, 295)  # "onFailure" hook field (see docs/claude-code-guard.md)
 REQUIRED_SCOPES = frozenset({"requests:create", "requests:read"})
@@ -195,8 +196,52 @@ def check_policy_row(
     )
 
 
+def check_agent_settings(sources: Mapping[str, str], settings_file: Path) -> list[Check]:
+    """One check per guard setting: where it comes from, or FAIL with the fix."""
+    return [
+        Check(name, PASS, f"set (from {sources[name]})")
+        if name in sources
+        else Check(
+            name,
+            FAIL,
+            f"{name} is not set (not in this window, not in {settings_file}). {guard.CONFIG_FIX}",
+        )
+        for name in local_config.AGENT_VARS
+    ]
+
+
+def check_settings_file_ignored(ignored: bool | None) -> Check:
+    name = "settings.local.json ignored"
+    if ignored:
+        return Check(name, PASS, "git-ignored (it holds the agent key)")
+    if ignored is None:
+        return Check(name, WARN, "could not confirm it is git-ignored (git unavailable)")
+    return Check(name, FAIL, "NOT git-ignored, but it holds the agent key: add it to .gitignore")
+
+
+def check_polling(reconcile_after_seconds: int) -> Check:
+    """Missed webhooks (e.g. a dead tunnel) are recovered by polling Bolna."""
+    name = "Polling fallback"
+    if reconcile_after_seconds <= 60:
+        return Check(
+            name,
+            PASS,
+            f"VOICE_RECONCILE_AFTER_SECONDS={reconcile_after_seconds}: without webhooks, "
+            f"decisions arrive within about {reconcile_after_seconds} s of the call's end",
+        )
+    return Check(
+        name,
+        WARN,
+        f"VOICE_RECONCILE_AFTER_SECONDS={reconcile_after_seconds}: if webhooks are lost, a "
+        "decision can take that long; set 30 in backend/.env for the demo",
+    )
+
+
 def check_bolna_agent(
-    agent: Mapping[str, Any], expected_url: str | None, token: str | None
+    agent: Mapping[str, Any],
+    expected_url: str | None,
+    token: str | None,
+    poll_seconds: int | None = None,
 ) -> list[Check]:
     checks = []
     saved = agent.get("webhook_url")
@@ -205,9 +250,16 @@ def check_bolna_agent(
     elif saved == expected_url:
         checks.append(Check("Bolna webhook URL", PASS, f"saved in Bolna: {saved}"))
     else:
+        # Webhooks are only signals: the worker polls Bolna for calls with no update.
         shown = saved if isinstance(saved, str) else "(none)"
+        every = f" (every {poll_seconds} s)" if poll_seconds else ""
         checks.append(
-            Check("Bolna webhook URL", FAIL, f"Bolna has {shown}; expected {expected_url}")
+            Check(
+                "Bolna webhook URL",
+                WARN,
+                f"Bolna has {shown}; expected {expected_url}; decisions still arrive by "
+                f"polling{every}",
+            )
         )
     headers = agent.get("webhook_headers")
     supplied = headers.get("X-Approval-Line-Webhook-Token") if isinstance(headers, dict) else None
@@ -291,6 +343,20 @@ def run_doctor(
     """``settings`` defaults to backend/.env; tests pass their own (and a test database)."""
     report = Report()
 
+    # 0. The guard's settings, as the hook will see them: the project's settings.local.json
+    #    "env" block wins over this window's variables (as in Claude Code).
+    try:
+        env, sources = local_config.effective_env(env, demo_dir)
+    except local_config.LocalSettingsError as exc:
+        report.add("Local settings", FAIL, exc.message)
+        sources = {n: local_config.SOURCE_PROCESS for n in local_config.AGENT_VARS if env.get(n)}
+    settings_file = local_config.settings_local_path(demo_dir)
+    report.checks.extend(check_agent_settings(sources, settings_file))
+    if settings_file.is_file():
+        report.checks.append(
+            check_settings_file_ignored(local_config.is_git_ignored(settings_file))
+        )
+
     # 1. Claude Code
     report.checks.append(check_claude_version(claude_output()))
 
@@ -323,7 +389,7 @@ def run_doctor(
     rules_value = env.get(guard.ENV_RULES, "").strip()
     policy_ids: list[UUID] = []
     if not rules_value:
-        report.add("Rules file", FAIL, f"{guard.ENV_RULES} is not set in this window")
+        report.add("Rules file", SKIP, f"not checked ({guard.ENV_RULES} is not set)")
     else:
         try:
             rules = guard.load_rules(rules_value)
@@ -374,6 +440,7 @@ def run_doctor(
         f"'{settings.bolna_decision_extraction}', identity '{settings.bolna_identity_extraction}', "
         f"condition '{settings.bolna_condition_extraction}' (must match the Bolna agent)",
     )
+    report.checks.append(check_polling(settings.voice_reconcile_after_seconds))
 
     # 5. Database: migrations, worker signal, policies, agent key
     from alembic.config import Config
@@ -419,7 +486,7 @@ def run_doctor(
 
             api_key = env.get("APPROVAL_LINE_API_KEY", "").strip()
             if not api_key:
-                report.add("Agent key", FAIL, "APPROVAL_LINE_API_KEY is not set in this window")
+                report.add("Agent key", SKIP, "not checked (APPROVAL_LINE_API_KEY is not set)")
             else:
                 row = (
                     db.execute(
@@ -467,7 +534,8 @@ def run_doctor(
         engine.dispose()
 
     # 6. API, agent key over HTTP, public tunnel
-    api_url = env.get("APPROVAL_LINE_API_URL", "").strip().rstrip("/") or "http://127.0.0.1:8000"
+    # No default URL: the guard has none either, so checking one would hide a broken setup.
+    api_url = env.get("APPROVAL_LINE_API_URL", "").strip().rstrip("/")
 
     def get_ok(url: str, **kwargs: Any) -> tuple[bool, str]:
         try:
@@ -476,11 +544,16 @@ def run_doctor(
             return False, type(exc).__name__
         return response.status_code == 200, f"HTTP {response.status_code}"
 
-    ok, detail = get_ok(f"{api_url}/api/v1/health/ready")
-    report.add("API ready", PASS if ok else FAIL, f"{api_url}: {detail}")
-    if api_key := env.get("APPROVAL_LINE_API_KEY", "").strip():
-        ok, detail = get_ok(f"{api_url}/api/v1/requests?limit=1", headers={"X-API-Key": api_key})
-        report.add("Agent key over HTTP", PASS if ok else FAIL, f"GET /requests: {detail}")
+    if not api_url:
+        report.add("API ready", SKIP, "not checked (APPROVAL_LINE_API_URL is not set)")
+    else:
+        ok, detail = get_ok(f"{api_url}/api/v1/health/ready")
+        report.add("API ready", PASS if ok else FAIL, f"{api_url}: {detail}")
+        if api_key := env.get("APPROVAL_LINE_API_KEY", "").strip():
+            ok, detail = get_ok(
+                f"{api_url}/api/v1/requests?limit=1", headers={"X-API-Key": api_key}
+            )
+            report.add("Agent key over HTTP", PASS if ok else FAIL, f"GET /requests: {detail}")
 
     tunnel = _tunnel_url(env)
     expected_webhook = f"{tunnel}{WEBHOOK_PATH}" if tunnel else None
@@ -538,7 +611,10 @@ def run_doctor(
             token = settings.voice_webhook_token
             report.checks.extend(
                 check_bolna_agent(
-                    agent, expected_webhook, token.get_secret_value() if token else None
+                    agent,
+                    expected_webhook,
+                    token.get_secret_value() if token else None,
+                    settings.voice_reconcile_after_seconds,
                 )
             )
     return report
@@ -560,9 +636,20 @@ def render(report: Report) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--no-bolna", action="store_true", help="Skip the Bolna agent GET.")
+    parser.add_argument(
+        "--project",
+        type=Path,
+        default=DEMO_DIR,
+        help="Claude Code project with the guard hook (default: demo-target).",
+    )
     args = parser.parse_args(argv)
     with httpx.Client(follow_redirects=False) as http:
-        report = run_doctor(os.environ, http=http, check_bolna=not args.no_bolna)
+        report = run_doctor(
+            os.environ,
+            http=http,
+            check_bolna=not args.no_bolna,
+            demo_dir=args.project.resolve(),
+        )
     print(render(report))
     return 0 if report.ready else 1
 

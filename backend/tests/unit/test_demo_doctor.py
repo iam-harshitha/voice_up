@@ -94,9 +94,41 @@ def test_bolna_agent_comparison_never_shows_the_token():
         "PASS",
         "PASS",
     ]
-    bad = doctor.check_bolna_agent({"webhook_headers": {}}, "https://x/h", token)
-    assert [c.status for c in bad] == ["FAIL", "FAIL"]
+    bad = doctor.check_bolna_agent({"webhook_headers": {}}, "https://x/h", token, 30)
+    # A stale webhook URL only slows decisions down (they arrive by polling): a warning.
+    # A wrong token means a misconfigured agent: still a failure.
+    assert [c.status for c in bad] == ["WARN", "FAIL"]
+    assert "decisions still arrive by polling (every 30 s)" in bad[0].detail
     assert all(token not in c.detail for c in bad)
+
+
+def test_polling_fallback_check():
+    assert doctor.check_polling(30).status == "PASS"
+    assert doctor.check_polling(60).status == "PASS"
+    slow = doctor.check_polling(600)
+    assert slow.status == "WARN" and "set 30" in slow.detail
+
+
+def test_agent_settings_report_their_source_or_the_fix(tmp_path):
+    settings_file = tmp_path / ".claude" / "settings.local.json"
+    sources = {
+        "APPROVAL_LINE_API_URL": "settings.local.json",
+        "APPROVAL_LINE_API_KEY": "process environment",
+    }
+    checks = {c.name: c for c in doctor.check_agent_settings(sources, settings_file)}
+    assert checks["APPROVAL_LINE_API_URL"].status == "PASS"
+    assert "settings.local.json" in checks["APPROVAL_LINE_API_URL"].detail
+    assert "process environment" in checks["APPROVAL_LINE_API_KEY"].detail
+    missing = checks["APPROVAL_LINE_GUARD_RULES"]
+    assert missing.status == "FAIL"
+    assert "APPROVAL_LINE_GUARD_RULES is not set" in missing.detail
+    assert "connect-claude" in missing.detail
+
+
+def test_settings_file_ignore_check():
+    assert doctor.check_settings_file_ignored(True).status == "PASS"
+    assert doctor.check_settings_file_ignored(None).status == "WARN"
+    assert doctor.check_settings_file_ignored(False).status == "FAIL"
 
 
 def test_policy_row_checks():

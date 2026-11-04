@@ -5,6 +5,7 @@ Runs against the test database with HTTP (API, tunnel, Bolna) behind a mock tran
 
 import importlib.util
 import json
+import subprocess
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -17,6 +18,7 @@ from sqlalchemy import func, select, text
 from app.db.base import utcnow
 from app.db.models import AuditEvent, VoiceJob
 from approval_line_agents.guard import ENV_RULES
+from approval_line_agents.local_config import AGENT_VARS
 from tests.helpers import create_approver, create_request, make_policy
 
 pytestmark = pytest.mark.integration
@@ -43,6 +45,7 @@ def bolna_settings(test_settings):
             "bolna_api_key": SecretStr(BOLNA_KEY),
             "bolna_agent_id": "agent-under-test",
             "voice_webhook_token": SecretStr(WEBHOOK_TOKEN),
+            "voice_reconcile_after_seconds": 30,
         }
     )
 
@@ -130,6 +133,8 @@ def world(client, make_tenant, test_settings, tmp_path, monkeypatch):
         "policy": policy,
         "approver": approver,
         "write_rules": write_rules,
+        "env": env,
+        "demo_dir": demo_dir,
     }
 
 
@@ -161,6 +166,9 @@ def test_a_ready_setup_passes(world, session):
     assert "Verdict: READY" in output
     assert status_of(report, "Hook python path") == ["PASS"]
     assert status_of(report, "Hook python imports the guard") == ["PASS"]
+    for name in AGENT_VARS:
+        assert status_of(report, name) == ["PASS"]
+    assert status_of(report, "Polling fallback") == ["PASS"]
     assert status_of(report, "Policy ") == ["PASS"]
     assert status_of(report, "Agent key scopes") == ["PASS"]
     assert status_of(report, "Bolna webhook URL") == ["PASS"]
@@ -238,11 +246,88 @@ def test_worker_missing_or_stuck_fails(world, session_factory, client):
     assert not report.ready and "overdue" in output
 
 
-def test_bolna_webhook_mismatches_fail(world):
+def test_stale_bolna_webhook_url_warns_and_wrong_token_fails(world):
+    # Decisions still arrive by polling, so a stale URL (tunnel restarted) is a warning.
     report, output, _ = world["run"](network=Network(bolna_url="https://old.trycloudflare.test/x"))
-    assert not report.ready and "Bolna has https://old.trycloudflare.test/x" in output
+    assert report.ready, output
+    assert status_of(report, "Bolna webhook URL") == ["WARN"]
+    assert "Bolna has https://old.trycloudflare.test/x" in output
+    assert "decisions still arrive by polling (every 30 s)" in output
     report, output, _ = world["run"](network=Network(bolna_token="stale-token"))
     assert not report.ready and "does not match VOICE_WEBHOOK_TOKEN" in output
+
+
+# --- The guard's settings (APPROVAL_LINE_*): window variables or settings.local.json ------------
+
+
+@pytest.mark.parametrize("missing", AGENT_VARS)
+def test_each_missing_guard_setting_fails_with_the_fix(world, missing):
+    report, output, network = world["run"](**{missing: ""})
+    assert not report.ready
+    assert status_of(report, missing) == ["FAIL"]
+    assert f"{missing} is not set" in output and "connect-claude" in output
+    if missing == "APPROVAL_LINE_API_URL":
+        # No silent default: nothing is checked at an address the guard would not use.
+        assert status_of(report, "API ready") == ["SKIP"]
+        assert not any("/health/ready" in s and "127.0.0.1" in s for s in network.seen)
+
+
+def write_settings_local(demo_dir, payload):
+    path = demo_dir / ".claude" / "settings.local.json"
+    path.write_text(payload if isinstance(payload, str) else json.dumps(payload), "utf-8")
+    return path
+
+
+def test_settings_local_json_alone_is_enough(world, monkeypatch):
+    """A fresh window with no APPROVAL_LINE_* variables: the values come from the file."""
+    monkeypatch.setattr(doctor.local_config, "is_git_ignored", lambda path: True)
+    env = world["env"]
+    write_settings_local(world["demo_dir"], {"env": {n: env[n] for n in AGENT_VARS}})
+    report, output, _ = world["run"](**{n: "" for n in AGENT_VARS})
+    assert report.ready, output
+    for name in AGENT_VARS:
+        assert status_of(report, name) == ["PASS"]
+    assert output.count("set (from settings.local.json)") == len(AGENT_VARS)
+    assert status_of(report, "settings.local.json ignored") == ["PASS"]
+
+    monkeypatch.setattr(doctor.local_config, "is_git_ignored", lambda path: None)
+    report, output, _ = world["run"](**{n: "" for n in AGENT_VARS})
+    assert report.ready, output  # git unavailable: cannot confirm, so only a warning
+    assert status_of(report, "settings.local.json ignored") == ["WARN"]
+
+
+def test_settings_local_json_wins_over_the_window(world, monkeypatch):
+    """As in Claude Code: a stale key in the window must not hide the key the hook gets."""
+    monkeypatch.setattr(doctor.local_config, "is_git_ignored", lambda path: True)
+    env = world["env"]
+    write_settings_local(world["demo_dir"], {"env": {n: env[n] for n in AGENT_VARS}})
+    report, output, _ = world["run"](APPROVAL_LINE_API_KEY="al_stale_window_key_" + "q" * 30)
+    assert report.ready, output
+    assert status_of(report, "Agent key scopes") == ["PASS"]
+
+
+def test_settings_local_json_that_git_does_not_ignore_fails(world, tmp_path):
+    """Real git: tmp_path becomes the nearest repository, whatever encloses it."""
+    env, demo_dir = world["env"], world["demo_dir"]
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S603, S607
+    write_settings_local(demo_dir, {"env": {n: env[n] for n in AGENT_VARS}})
+    report, output, _ = world["run"]()
+    assert not report.ready
+    assert status_of(report, "settings.local.json ignored") == ["FAIL"]
+
+    (tmp_path / ".gitignore").write_text("demo-target/.claude/settings.local.json\n", "utf-8")
+    report, output, _ = world["run"]()
+    assert report.ready, output
+    assert status_of(report, "settings.local.json ignored") == ["PASS"]
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]", json.dumps({"env": {"X": 1}})])
+def test_unusable_settings_local_json_fails(world, content):
+    write_settings_local(world["demo_dir"], content)
+    report, output, _ = world["run"]()
+    assert not report.ready
+    assert status_of(report, "Local settings") == ["FAIL"]
+    assert "settings.local.json" in output
 
 
 def test_missing_rules_and_tunnel_fail(world):
