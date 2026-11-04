@@ -19,9 +19,11 @@ from app.db.models import (
     VoiceCall,
     VoiceJob,
 )
+from app.db.models.text import PromptReason
 from app.db.models.voice import DecisionStatus, JobType
 from app.db.session import transaction
-from app.services import audit_service
+from app.domain.snapshot import snapshot_channel
+from app.services import audit_service, text_service
 from app.services.approval_service import require_open
 from app.services.audit_service import AuditEventType
 from app.voice.base import TERMINAL_STATUSES, CallStatus
@@ -63,6 +65,10 @@ def create_call(
     apply to every path. Returns (call, None) for a new call, or (existing_or_None, reason)
     when no new call is created.
     """
+    if snapshot_channel(request.policy_snapshot) == "text":
+        # A 'text' request is never dialled, whichever path asks (defence in depth: the
+        # callers route text requests to Telegram before reaching here).
+        return None, "text_channel"
     if settings.voice_provider == "disabled":
         return None, "voice_unavailable"
     previous = session.scalar(
@@ -126,7 +132,25 @@ def schedule_reapproval(
 ) -> None:
     """After a condition is satisfied, ask the same approver again (inside the caller's
     transaction). Without voice the step is still audited; the approver can answer
-    through the trusted vote endpoint."""
+    through the trusted vote endpoint. A 'text' request asks again by Telegram."""
+    if snapshot_channel(request.policy_snapshot) == "text":
+        prompt, skipped = text_service.prompt_or_audit(
+            session, settings, request, approver_id, PromptReason.REAPPROVAL
+        )
+        audit_service.record_event(
+            session,
+            organization_id=request.organization_id,
+            request_id=request.id,
+            event_type=AuditEventType.REAPPROVAL_REQUESTED,
+            data={
+                "approver_id": str(approver_id),
+                "voice_call_id": None,
+                "call_outcome": "text_channel",
+                "text_prompt_id": str(prompt.id) if prompt is not None else None,
+                "text_outcome": skipped or "prompt_queued",
+            },
+        )
+        return
     call, skipped = create_call(
         session, settings, request, approver_id, reason="reapproval", allow_redial=True
     )
@@ -166,6 +190,11 @@ def schedule_calls(
         # Locking the request serialises concurrent scheduling and orders the lock
         # before any vote on this request (votes lock the request first as well).
         request = _lock_request(session, organization_id, request_id)
+        if snapshot_channel(request.policy_snapshot) == "text":
+            raise BusinessRuleError(
+                "This request uses text approvals; calls are never placed for it.",
+                code="text_channel",
+            )
         require_open(request, utcnow())
         return _schedule_locked(
             session, settings, request, redial_unanswered=redial_unanswered, reason="scheduled"

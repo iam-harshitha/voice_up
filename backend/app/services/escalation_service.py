@@ -21,8 +21,9 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.db.models import ApprovalRequest, EscalationStep
+from app.db.models.text import PromptReason
 from app.domain.approval_rules import RequestStatus
-from app.services import audit_service, voice_service
+from app.services import audit_service, text_service, voice_service
 from app.services.approval_service import evaluate, request_rules
 from app.services.audit_service import AuditEventType
 
@@ -75,9 +76,18 @@ def run_escalation_round(
         if remaining <= 0 or not available:
             break
         backup = available.pop(0)
-        call, skipped = voice_service.create_call(
-            session, settings, request, backup, reason="escalation"
-        )
+        prompt_data: dict[str, str | None] = {}
+        if text_service.is_text_request(request):
+            # A 'text' request escalates by Telegram, never by phone.
+            prompt, prompt_skip = text_service.prompt_or_audit(
+                session, settings, request, backup, PromptReason.ESCALATION
+            )
+            call, skipped = None, prompt_skip or "text_prompt_queued"
+            prompt_data["text_prompt_id"] = str(prompt.id) if prompt else None
+        else:
+            call, skipped = voice_service.create_call(
+                session, settings, request, backup, reason="escalation"
+            )
         step = EscalationStep(
             organization_id=request.organization_id,
             request_id=request.id,
@@ -103,6 +113,7 @@ def run_escalation_round(
                 "backup_approver_id": str(backup),
                 "outcome": step.outcome,
                 "voice_call_id": str(step.voice_call_id) if step.voice_call_id else None,
+                **prompt_data,
             },
         )
         created += 1

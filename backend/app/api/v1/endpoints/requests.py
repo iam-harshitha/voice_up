@@ -15,7 +15,7 @@ from app.schemas.request import (
     RequestStats,
     RequestStatusCounts,
 )
-from app.services import approval_service, voice_service
+from app.services import approval_service, contact_service
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -54,14 +54,17 @@ def create_request(
     idempotency_key: IdempotencyKey = None,
 ) -> ApprovalRequestRead:
     settings = http_request.app.state.settings
-    # Policies with auto_dial schedule their calls server-side, in the creation
-    # transaction, so the agent's key never needs voice:calls:create.
+    # Policies with auto_dial contact their approvers server-side (calls, or Telegram
+    # prompts for approval_channel='text'), in the creation transaction, so the agent's
+    # key never needs voice:calls:create.
     request, created = approval_service.submit_request(
         session,
         org.organization_id,
         body,
         idempotency_key=idempotency_key,
-        on_created=lambda db, new, policy: voice_service.auto_dial(db, settings, new, policy),
+        on_created=lambda db, new, policy: contact_service.on_request_created(
+            db, settings, new, policy
+        ),
     )
     if not created:
         response.status_code = status.HTTP_200_OK
