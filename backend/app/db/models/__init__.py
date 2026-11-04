@@ -8,6 +8,7 @@ from app.db.models.approver import Approver
 from app.db.models.audit_event import AuditEvent
 from app.db.models.dashboard import DashboardSession, DashboardUser
 from app.db.models.organization import Organization
+from app.db.models.text import ApproverChannelLink, TextPrompt
 from app.db.models.voice import VoiceCall, VoiceJob, VoiceProviderEvent
 from app.db.models.workflow import ApprovalCondition, EscalationStep
 
@@ -18,6 +19,7 @@ __all__ = [
     "ApprovalRequest",
     "ApprovalVote",
     "Approver",
+    "ApproverChannelLink",
     "AuditEvent",
     "DashboardSession",
     "DashboardUser",
@@ -25,6 +27,7 @@ __all__ = [
     "Organization",
     "PolicyApprover",
     "RequestApprover",
+    "TextPrompt",
     "VoiceCall",
     "VoiceJob",
     "VoiceProviderEvent",

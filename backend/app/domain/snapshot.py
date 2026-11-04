@@ -7,6 +7,10 @@ Version 2 adds explicit "approval_mode", "veto_mode", "primaries" (approver_id, 
 "backups" (escalation order), "deadline_seconds", "escalation_after_seconds",
 "max_escalations" and "condition_rule". "approver_ids" (the primaries) is kept so
 existing readers keep working.
+
+Optional "approval_channel" ("text"; absent means "voice") freezes how the request's
+approvers are contacted. It is written only for non-voice policies, so voice snapshots
+are unchanged, and it never affects how a request is decided.
 """
 
 from dataclasses import dataclass
@@ -26,6 +30,13 @@ SNAPSHOT_VERSION = 2
 # A satisfied condition never approves by itself: the approver who set it must approve
 # again, unconditionally. This is the only supported rule.
 CONDITION_RULE_REAPPROVAL = "reapproval_required"
+CHANNEL_VOICE = "voice"
+CHANNELS = ("voice", "text_then_voice", "text")
+
+
+def snapshot_channel(snapshot: dict[str, Any]) -> str:
+    """How the request's approvers are contacted ('voice' for every older snapshot)."""
+    return str(snapshot.get("approval_channel", CHANNEL_VOICE))
 
 
 @dataclass(frozen=True)
@@ -54,8 +65,9 @@ def build_snapshot(
     deadline_seconds: int | None,
     escalation_after_seconds: int | None,
     max_escalations: int,
+    approval_channel: str = CHANNEL_VOICE,
 ) -> dict[str, Any]:
-    snapshot = {
+    snapshot: dict[str, Any] = {
         "schema_version": SNAPSHOT_VERSION,
         "policy_id": str(policy_id),
         "name": name,
@@ -74,6 +86,8 @@ def build_snapshot(
         "max_escalations": max_escalations,
         "condition_rule": CONDITION_RULE_REAPPROVAL,
     }
+    if approval_channel != CHANNEL_VOICE:
+        snapshot["approval_channel"] = approval_channel
     read_snapshot(snapshot)  # never persist a snapshot we cannot evaluate
     return snapshot
 
@@ -112,6 +126,8 @@ def read_snapshot(snapshot: dict[str, Any]) -> RequestRules:
             raise InvalidPolicyError("unsupported condition rule")
         if [str(s.approver_id) for s in seats] != snapshot["approver_ids"]:
             raise InvalidPolicyError("approver_ids does not match primaries")
+        if snapshot_channel(snapshot) not in CHANNELS:
+            raise InvalidPolicyError("unsupported approval channel")
         return RequestRules(
             rules,
             backups,

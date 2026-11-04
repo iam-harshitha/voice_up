@@ -27,6 +27,15 @@ from app.services import audit_service
 from app.services.audit_service import AuditEventType
 
 POLICY_INVALID = "approval_policy_invalid"
+CHANNEL_SETTINGS = ("approval_channel", "voice_fallback_after_seconds")
+
+
+def _require_available_channel(channel: str) -> None:
+    if channel == "text_then_voice":
+        raise BusinessRuleError(
+            "approval_channel 'text_then_voice' is not available yet; use 'voice' or 'text'.",
+            code="approval_channel_unavailable",
+        )
 
 
 # --- Approvers ---------------------------------------------------------------------------
@@ -308,6 +317,7 @@ def create_policy(
             else _default_max_escalations(data.escalation_after_seconds, data.backup_approver_ids)
         ),
     )
+    _require_available_channel(data.approval_channel)
     with transaction(session):
         primaries, backups = _validate_config(session, organization_id, config)
         policy = ApprovalPolicy(
@@ -315,6 +325,8 @@ def create_policy(
             name=data.name,
             description=data.description,
             auto_dial=data.auto_dial,
+            approval_channel=data.approval_channel,
+            voice_fallback_after_seconds=data.voice_fallback_after_seconds,
         )
         _apply_config(policy, config)
         policy.approver_links = _links(organization_id, config, primaries, backups)
@@ -329,6 +341,8 @@ def create_policy(
                 "version": policy.version,
                 "actor_api_key_id": _actor(actor_api_key_id),
                 "auto_dial": policy.auto_dial,
+                "approval_channel": policy.approval_channel,
+                "voice_fallback_after_seconds": policy.voice_fallback_after_seconds,
                 **_config_data(config),
             },
         )
@@ -374,11 +388,13 @@ def update_policy(
     they carry their own policy snapshot.
     """
     supplied = data.model_fields_set
+    if "approval_channel" in supplied and data.approval_channel is not None:
+        _require_available_channel(data.approval_channel)
     with transaction(session):
         policy = get_policy(session, organization_id, policy_id, lock="update")
         changed: list[str] = []
 
-        for field in ("name", "description", "is_active", "auto_dial"):
+        for field in ("name", "description", "is_active", "auto_dial", *CHANNEL_SETTINGS):
             if field in supplied and getattr(policy, field) != getattr(data, field):
                 setattr(policy, field, getattr(data, field))
                 changed.append(field)
@@ -422,6 +438,8 @@ def update_policy(
                     "changed_fields": changed,
                     "actor_api_key_id": _actor(actor_api_key_id),
                     "auto_dial": policy.auto_dial,
+                    "approval_channel": policy.approval_channel,
+                    "voice_fallback_after_seconds": policy.voice_fallback_after_seconds,
                     **_config_data(current),
                 },
             )

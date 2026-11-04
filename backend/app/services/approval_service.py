@@ -213,6 +213,7 @@ def create_request(
             deadline_seconds=policy.decision_deadline_seconds,
             escalation_after_seconds=policy.escalation_after_seconds if backups else None,
             max_escalations=min(policy.max_escalations, len(backups)) if backups else 0,
+            approval_channel=policy.approval_channel,
         )
         expires_at = (
             now + timedelta(seconds=policy.decision_deadline_seconds)
@@ -288,6 +289,12 @@ def create_request(
                 "max_escalations": snapshot["max_escalations"],
                 "auto_dial": policy.auto_dial,
                 "action": data.action,
+                # Only for non-voice policies, so voice audit data is unchanged.
+                **(
+                    {"approval_channel": policy.approval_channel}
+                    if policy.approval_channel != "voice"
+                    else {}
+                ),
             },
         )
         if on_created is not None:

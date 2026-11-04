@@ -5,8 +5,8 @@ Events are added to the caller's session and therefore commit or roll back toget
 the business change they describe. Event data must never contain credentials, contact
 details or transcripts; reference entities by ID instead.
 
-Every event describes a request (request_id) or, for policy administration, a policy
-(policy_id).
+Every event describes a request (request_id), a policy (policy_id, for policy
+administration) or an approver (approver_id, for Telegram channel links).
 """
 
 from enum import StrEnum
@@ -43,6 +43,13 @@ class AuditEventType(StrEnum):
     VOICE_DECISION_ACCEPTED = "voice.decision_accepted"
     VOICE_DECISION_REJECTED = "voice.decision_rejected"
     VOICE_EVENT_IGNORED = "voice.event_ignored"
+    TEXT_PROMPT_SENT = "text.prompt_sent"
+    TEXT_PROMPT_FAILED = "text.prompt_failed"
+    TEXT_DECISION_ACCEPTED = "text.decision_accepted"
+    TEXT_DECISION_REJECTED = "text.decision_rejected"
+    CHANNEL_LINK_CREATED = "channel.link_created"
+    CHANNEL_LINK_REVOKED = "channel.link_revoked"
+    CHANNEL_LINK_REJECTED = "channel.link_rejected"
 
 
 def record_event(
@@ -53,13 +60,15 @@ def record_event(
     data: dict[str, Any],
     request_id: UUID | None = None,
     policy_id: UUID | None = None,
+    approver_id: UUID | None = None,
 ) -> AuditEvent:
-    if request_id is None and policy_id is None:
-        raise ValueError("an audit event needs a request_id or a policy_id")
+    if request_id is None and policy_id is None and approver_id is None:
+        raise ValueError("an audit event needs a request_id, a policy_id or an approver_id")
     event = AuditEvent(
         organization_id=organization_id,
         request_id=request_id,
         policy_id=policy_id,
+        approver_id=approver_id,
         event_type=event_type.value,
         event_data=data,
     )

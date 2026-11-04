@@ -54,6 +54,10 @@ ApprovalModeField = Literal["unanimous", "quorum"]
 VetoModeField = Literal["any_rejection", "designated", "none"]
 DeadlineSeconds = Annotated[int, Field(ge=60, le=30 * 24 * 3600)]
 EscalationSeconds = Annotated[int, Field(ge=60, le=7 * 24 * 3600)]
+# 'text_then_voice' is accepted here and by the database, but the policy service refuses
+# it until it is built (approval_channel_unavailable).
+ApprovalChannelField = Literal["voice", "text_then_voice", "text"]
+FallbackSeconds = Annotated[int, Field(ge=10, le=3600)]
 
 
 class PolicyCreate(StrictInput):
@@ -75,6 +79,9 @@ class PolicyCreate(StrictInput):
     max_escalations: Annotated[int, Field(ge=0, le=3)] | None = None
     # Opt-in: schedule the approvers' calls automatically when a request is created.
     auto_dial: bool = False
+    # How auto_dial contacts approvers: 'voice' (calls; default) or 'text' (Telegram only).
+    approval_channel: ApprovalChannelField = "voice"
+    voice_fallback_after_seconds: FallbackSeconds = 60
 
 
 class PolicyUpdate(StrictInput):
@@ -92,6 +99,8 @@ class PolicyUpdate(StrictInput):
     escalation_after_seconds: EscalationSeconds | None = None
     max_escalations: Annotated[int, Field(ge=0, le=3)] | None = None
     auto_dial: bool | None = None
+    approval_channel: ApprovalChannelField | None = None
+    voice_fallback_after_seconds: FallbackSeconds | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> Self:
@@ -101,6 +110,8 @@ class PolicyUpdate(StrictInput):
             "name",
             "is_active",
             "auto_dial",
+            "approval_channel",
+            "voice_fallback_after_seconds",
             "approval_mode",
             "required_approvals",
             "approver_ids",
@@ -136,5 +147,7 @@ class PolicyRead(ApiOutput):
     escalation_after_seconds: int | None
     max_escalations: int
     auto_dial: bool
+    approval_channel: str
+    voice_fallback_after_seconds: int
     created_at: datetime
     updated_at: datetime

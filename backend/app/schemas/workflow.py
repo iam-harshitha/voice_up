@@ -69,6 +69,7 @@ class AuditEventRead(ApiOutput):
     sequence: int
     request_id: UUID | None
     policy_id: UUID | None
+    approver_id: UUID | None = None
     event_type: str
     event_data: dict[str, Any]
     created_at: datetime
