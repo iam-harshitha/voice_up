@@ -16,10 +16,11 @@ from pydantic import SecretStr
 from sqlalchemy import func, select, text
 
 from app.db.base import utcnow
-from app.db.models import AuditEvent, VoiceJob
+from app.db.models import ApproverChannelLink, AuditEvent, VoiceJob
+from app.db.models.text import LinkStatus
 from approval_line_agents.guard import ENV_RULES
 from approval_line_agents.local_config import AGENT_VARS
-from tests.helpers import create_approver, create_request, make_policy
+from tests.helpers import API, create_approver, create_request, make_policy
 
 pytestmark = pytest.mark.integration
 
@@ -79,6 +80,16 @@ class Network:
         return httpx.Response(404)
 
 
+TELEGRAM_TOKEN = "123456789:" + "D" * 35  # fixture value in BotFather's format
+TEXT_SECRET = "doctor-text-secret-" + "e" * 32
+TELEGRAM_SETTINGS = {
+    "text_provider": "telegram",
+    "telegram_bot_token": SecretStr(TELEGRAM_TOKEN),
+    "telegram_bot_username": "approval_line_test_bot",
+    "text_callback_secret": SecretStr(TEXT_SECRET),
+}
+
+
 @pytest.fixture
 def world(client, make_tenant, test_settings, tmp_path, monkeypatch):
     # Never read the developer's real .demo/tunnel-url.txt.
@@ -110,19 +121,36 @@ def world(client, make_tenant, test_settings, tmp_path, monkeypatch):
         "APPROVAL_LINE_PUBLIC_URL": TUNNEL,
     }
 
-    def run(*, network=None, workers=1, version="2.1.300 (Claude Code)", **env_overrides):
+    def run(
+        *,
+        network=None,
+        workers=1,
+        text_workers=1,
+        settings_update=None,
+        version="2.1.300 (Claude Code)",
+        **env_overrides,
+    ):
         network = network or Network()
+        settings = bolna_settings(test_settings).model_copy(update=settings_update or {})
         with httpx.Client(transport=httpx.MockTransport(network.handle)) as http:
             report = doctor.run_doctor(
                 {**env, **env_overrides},
                 http=http,
                 claude_output=lambda: version,
                 workers=lambda: workers,
-                settings=bolna_settings(test_settings),
+                text_workers=lambda: text_workers,
+                settings=settings,
                 demo_dir=demo_dir,
             )
         output = doctor.render(report)
-        for secret in (tenant.keys["guard"], WEBHOOK_TOKEN, BOLNA_KEY, PHONE):
+        for secret in (
+            tenant.keys["guard"],
+            WEBHOOK_TOKEN,
+            BOLNA_KEY,
+            PHONE,
+            TELEGRAM_TOKEN,
+            TEXT_SECRET,
+        ):
             assert secret not in output
         return report, output, network
 
@@ -336,3 +364,60 @@ def test_missing_rules_and_tunnel_fail(world):
     assert "APPROVAL_LINE_GUARD_RULES is not set" in output
     assert status_of(report, "Public tunnel") == ["FAIL"]
     assert status_of(report, "Bolna webhook URL") == ["WARN"]  # nothing to compare with
+
+
+# --- Text approvals ------------------------------------------------------------------------
+
+
+def by_name(report, prefix: str):
+    return [c for c in report.checks if c.name.startswith(prefix)]
+
+
+def test_text_disabled_is_skipped_and_does_not_block_ready(world):
+    report, output, _ = world["run"]()
+    (provider,) = by_name(report, "Text provider")
+    assert provider.status == "SKIP" and by_name(report, "Text worker") == []
+    assert "[FAIL]" not in output.replace("[FAIL] Public tunnel", "")
+
+
+def test_a_text_policy_needs_pairing_and_the_text_worker(world, session_factory):
+    client, tenant, policy = world["client"], world["tenant"], world["policy"]
+    client.patch(
+        f"{API}/policies/{policy['id']}", json={"approval_channel": "text"}, headers=tenant.admin
+    )
+    report, output, _ = world["run"](settings_update=TELEGRAM_SETTINGS, text_workers=0)
+    assert by_name(report, "Telegram settings")[0].status == "PASS"
+    assert "TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME, TEXT_CALLBACK_SECRET present" in output
+    (pairing,) = by_name(report, "Text pairing")
+    assert pairing.status == "FAIL" and "pair-telegram" in pairing.detail
+    assert by_name(report, "Text worker")[0].status == "FAIL"
+    assert "channel text (Telegram only, no calls)" in by_name(report, "Policy")[0].detail
+
+    # Pair the approver (as the bot would) and start the worker: both pass.
+    with session_factory() as db:
+        db.add(
+            ApproverChannelLink(
+                organization_id=tenant.organization_id,
+                approver_id=world["approver"]["id"],
+                channel="telegram",
+                status=LinkStatus.VERIFIED,
+                external_user_id="7000001",
+                external_chat_id="7000001",
+                verified_at=utcnow(),
+            )
+        )
+        db.commit()
+    report, output, _ = world["run"](settings_update=TELEGRAM_SETTINGS, text_workers=1)
+    assert by_name(report, "Text pairing")[0].status == "PASS"
+    assert by_name(report, "Text worker")[0].status == "PASS"
+    assert "7000001" not in output
+
+
+def test_a_text_policy_with_text_disabled_fails(world):
+    client, tenant, policy = world["client"], world["tenant"], world["policy"]
+    client.patch(
+        f"{API}/policies/{policy['id']}", json={"approval_channel": "text"}, headers=tenant.admin
+    )
+    report, _, _ = world["run"]()
+    (pairing,) = by_name(report, "Text pairing")
+    assert pairing.status == "FAIL" and "TEXT_PROVIDER=disabled" in pairing.detail

@@ -12,6 +12,9 @@
       additive; nothing is ever dropped or reset);
     - starts the processes hidden, logs to .demo/logs, and records ONLY their PIDs in
       .demo/processes.json so scripts/stop-demo.ps1 stops exactly those and nothing else;
+    - with TEXT_PROVIDER set (telegram or mock), also starts the text worker
+      (app.workers.text_worker; Telegram long polling, no public URL); with the default
+      TEXT_PROVIDER=disabled it is not started;
     - waits for the API readiness endpoint and the dashboard;
     - with VOICE_PROVIDER=bolna, starts a Cloudflare quick tunnel to the API (unless
       -NoTunnel), waits until it serves /health/ready, saves its URL to
@@ -83,6 +86,8 @@ print(json.dumps({
   'webhook_token': bool(tok and tok.get_secret_value()),
   'mock_state_dir': bool(s.voice_mock_state_dir),
   'bolna_key': bool(s.bolna_api_key and s.bolna_api_key.get_secret_value()),
+  'text_provider': s.text_provider,
+  'telegram_token': bool(s.telegram_bot_token and s.telegram_bot_token.get_secret_value()),
 }))
 "@
     if ($LASTEXITCODE -ne 0) { Fail "backend\.env could not be loaded (see the error above; values are not printed)." }
@@ -109,6 +114,16 @@ switch ($config.voice_provider) {
     }
     default { Write-Host "  >> Voice calls disabled." }
 }
+Write-Host ("  TEXT_PROVIDER         {0}" -f $config.text_provider)
+if ($config.text_provider -ne "disabled") {
+    Write-Host ("  TELEGRAM_BOT_TOKEN    {0}" -f $(if ($config.telegram_token) { "PRESENT" } else { "ABSENT" }))
+    if ($config.text_provider -eq "mock") {
+        Write-Host "  >> SIMULATED TEXT: the mock provider sends no real Telegram messages (app.cli text-simulate)." -ForegroundColor Yellow
+    } else {
+        Write-Host "  >> REAL TEXT: Telegram messages go to paired approvers of policies with approval_channel=text." -ForegroundColor Magenta
+    }
+}
+$textEnabled = $config.text_provider -ne "disabled"
 
 # --- Ports and duplicate workers -----------------------------------------------------------
 foreach ($port in @($ApiPort, $WebPort)) {
@@ -122,6 +137,14 @@ $existingWorkers = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
     Where-Object { $_.CommandLine -match "app\.workers\.voice_worker" })
 if ($existingWorkers.Count -gt 0 -and -not $SkipWorker) {
     Fail "A voice worker is already running (PID $($existingWorkers[0].ProcessId)). Use -SkipWorker to reuse it, or stop it first."
+}
+if ($textEnabled) {
+    # Telegram allows a single long-poll consumer per bot token.
+    $existingText = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+        Where-Object { $_.CommandLine -match "app\.workers\.text_worker" })
+    if ($existingText.Count -gt 0) {
+        Fail "A text worker is already running (PID $($existingText[0].ProcessId)). Stop it first: one per bot."
+    }
 }
 
 # --- Migrations ------------------------------------------------------------------------------
@@ -154,6 +177,14 @@ if (-not $SkipWorker) {
         -ArgumentList @("-m", "app.workers.voice_worker", "--worker-id", "demo-$env:COMPUTERNAME") `
         -RedirectStandardOutput (Join-Path $LogDir "worker.out.log") -RedirectStandardError (Join-Path $LogDir "worker.err.log")
     $started["worker"] = $worker.Id
+}
+
+# The text worker is a separate process, started only when TEXT_PROVIDER is not disabled.
+if ($textEnabled) {
+    $textWorker = Start-Process -FilePath $Python -WorkingDirectory $Backend -WindowStyle Hidden -PassThru `
+        -ArgumentList @("-m", "app.workers.text_worker") `
+        -RedirectStandardOutput (Join-Path $LogDir "text-worker.out.log") -RedirectStandardError (Join-Path $LogDir "text-worker.err.log")
+    $started["textworker"] = $textWorker.Id
 }
 
 $env:APPROVAL_LINE_BACKEND_URL = "http://127.0.0.1:$ApiPort"
@@ -235,6 +266,7 @@ Write-Host ""
 Write-Host "Approval Line demo is running:" -ForegroundColor Green
 Write-Host "  API        http://127.0.0.1:$ApiPort/api/v1/health/ready   (PID $($started['api']))"
 if ($started.Contains("worker")) { Write-Host "  Worker     PID $($started['worker'])" } else { Write-Host "  Worker     reusing the already-running worker" }
+if ($started.Contains("textworker")) { Write-Host "  Text       PID $($started['textworker'])   (Telegram long polling; log .demo\logs\text-worker.err.log)" }
 Write-Host "  Dashboard  http://127.0.0.1:$WebPort/   (PID $($started['web']))"
 if ($started.Contains("tunnel")) { Write-Host "  Tunnel     $(if ($tunnelUrl) { $tunnelUrl } else { '(no URL yet)' })   (PID $($started['tunnel']))" }
 Write-Host "  Logs       .demo\logs\"

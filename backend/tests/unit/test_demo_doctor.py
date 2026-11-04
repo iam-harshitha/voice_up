@@ -150,3 +150,53 @@ def test_verdict_and_rendering():
     assert report.ready and "READY" in doctor.render(report)
     report.add("C", "FAIL", "broken")
     assert not report.ready and "NOT READY" in doctor.render(report)
+
+
+# --- Text approvals ------------------------------------------------------------------------
+
+
+def _text_settings(**values):
+    from types import SimpleNamespace
+
+    from pydantic import SecretStr
+
+    base = {
+        "text_provider": "telegram",
+        "telegram_bot_token": SecretStr("123456789:" + "U" * 35),
+        "telegram_bot_username": "approval_line_test_bot",
+        "text_callback_secret": SecretStr("u" * 40),
+    }
+    return SimpleNamespace(**{**base, **values})
+
+
+def test_text_settings_check_reports_names_never_values():
+    checks = doctor.check_text_settings(_text_settings())
+    assert [c.status for c in checks] == ["PASS", "PASS"]
+    assert "U" * 35 not in str(checks) and "u" * 40 not in str(checks)
+    missing = doctor.check_text_settings(_text_settings(telegram_bot_token=None))
+    assert missing[1].status == "FAIL" and "TELEGRAM_BOT_TOKEN" in missing[1].detail
+    assert doctor.check_text_settings(_text_settings(text_provider="disabled"))[0].status == "SKIP"
+    assert doctor.check_text_settings(_text_settings(text_provider="mock"))[0].status == "WARN"
+
+
+def test_text_pairing_and_worker_checks():
+    pid = uuid.uuid4()
+    assert doctor.check_text_pairing(pid, "voice", "telegram", []) is None
+    assert doctor.check_text_pairing(pid, "text", "disabled", [True]).status == "FAIL"
+    assert doctor.check_text_pairing(pid, "text", "telegram", [True, False]).status == "FAIL"
+    assert doctor.check_text_pairing(pid, "text", "telegram", []).status == "FAIL"
+    assert doctor.check_text_pairing(pid, "text", "telegram", [True]).status == "PASS"
+    assert doctor.check_text_worker(0, 0, text_needed=True).status == "FAIL"
+    assert doctor.check_text_worker(0, 0, text_needed=False).status == "WARN"
+    assert doctor.check_text_worker(1, 2, text_needed=True).status == "FAIL"
+    assert doctor.check_text_worker(None, 0, text_needed=True).status == "WARN"
+    assert doctor.check_text_worker(1, 0, text_needed=True).status == "PASS"
+
+
+def test_a_text_policy_needs_no_phone_numbers():
+    pid, org = uuid.uuid4(), uuid.uuid4()
+    row = {"name": "T", "is_active": True, "auto_dial": True, "organization_id": org}
+    no_phone = [{"is_active": True, "has_phone": False}]
+    assert doctor.check_policy_row(pid, row, no_phone, org).status == "FAIL"
+    text_row = {**row, "approval_channel": "text"}
+    assert doctor.check_policy_row(pid, text_row, no_phone, org).status == "PASS"

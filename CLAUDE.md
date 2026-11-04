@@ -24,6 +24,10 @@ from approvers' votes, and the agent reads back `pending` / `approved` / `reject
   tests, `demo-seed`, `scripts/start-demo.ps1` / `stop-demo.ps1`, CI, deployment
   artifacts (`backend/docs/deployment.md`, `security.md`, `demo-runbook.md`).
 
+- **Text approvals (Telegram; in progress on `feature/text-approvals`, mock-verified):**
+  migration 0007, policy `approval_channel` (`voice` default / `text`; `text_then_voice`
+  reserved and refused by the API), pairing, text worker (`backend/docs/text-telegram.md`).
+
 Don't build later-chunk features while working on an earlier one.
 
 ## Commands
@@ -50,6 +54,10 @@ python -m app.cli create-dashboard-user --org-id <id> --email x@example.com --na
 python -m approval_line_agents.mcp_server    # needs APPROVAL_LINE_API_URL / _API_KEY
 python -m approval_line_agents.demo --policy-id <id>
 python -m app.cli demo-seed --org-id <id> --yes [--issue-agent-key]   # dev only, additive
+python -m app.workers.text_worker              # Telegram prompts/taps (TEXT_PROVIDER != disabled)
+python -m app.cli pair-telegram --approver-id <id>     # one-time t.me link (10 min)
+python -m app.cli set-channel --policy-id <id> --channel text|voice
+python -m app.cli text-simulate --prompt-id <id> --action approve      # mock + dev only
 python scripts/measure_latency.py            # test DB only; never while pytest runs
 # repo root: .\scripts\start-demo.ps1 -Migrate ; .\scripts\stop-demo.ps1
 # repo root: .\scripts\demo-doctor.ps1    # read-only live-demo preflight (no calls, no secrets)
@@ -174,3 +182,22 @@ Chunk 4 invariants (see `backend/docs/dashboard-mcp.md`):
   schedules calls (auto-dial does). Its hook is registered only in `demo-target/.claude/`,
   for both shell tools (`Bash|PowerShell`: on Windows PowerShell is Claude's default
   shell). Every block message ends with `STOP_INSTRUCTION` (no retries, no workarounds).
+
+Text approval invariants (see `backend/docs/text-telegram.md`):
+
+- Off by default: `TEXT_PROVIDER=disabled` and `approval_channel='voice'` keep the voice
+  path byte-for-byte unchanged (`test_voice_channel_regression.py` pins it). The
+  snapshot gets `approval_channel` only for non-voice policies.
+- A `text` request is never dialled: `voice_service.create_call` returns `text_channel`
+  for it on every path; escalation and re-approval go by Telegram instead.
+- A tap is only a vote through `approval_service.record_vote(source="telegram")`. Tap
+  checks run in a fixed order (signature, unused, not expired, sender/chat match the
+  verified link, request pending) in ONE transaction that locks the request, then the
+  prompt. Free text is never a decision. Approve needs a confirm tap.
+- Only `app/text/telegram.py` knows Telegram field names. The bot token is in every API
+  URL: never log a URL, an httpx exception's text or a response body; keep
+  `httpx`/`httpcore` loggers at WARNING. Store only hashes of nonces and pairing codes.
+  Never put Telegram user/chat IDs in API responses or audit data; fictional IDs
+  (`70000xx`) in tests and docs.
+- Provider calls never happen inside a transaction (three-phase send; tap handlers return
+  actions performed after commit). One text worker per bot token.

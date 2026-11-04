@@ -52,6 +52,14 @@ RECOMMENDED_SCOPES = frozenset({"policies:read"})
 UNWANTED_SCOPES = frozenset({"votes:write", "voice:calls:create", "conditions:resolve"})
 WEBHOOK_PATH = "/api/v1/voice/webhooks/bolna"
 STALE_JOB_SECONDS = 120
+POLICY_SQL = (
+    "SELECT name, is_active, auto_dial, organization_id, approval_channel "
+    "FROM approval_policies WHERE id = :p"
+)
+POLICY_SQL_BEFORE_0007 = (
+    "SELECT name, is_active, auto_dial, organization_id, 'voice' AS approval_channel "
+    "FROM approval_policies WHERE id = :p"
+)
 
 PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
 
@@ -173,6 +181,7 @@ def check_policy_row(
     name = f"Policy {policy_id}"
     if row is None:
         return Check(name, FAIL, "does not exist")
+    by_text = row.get("approval_channel") == "text"
     problems = []
     if not row["is_active"]:
         problems.append("inactive")
@@ -180,20 +189,97 @@ def check_policy_row(
         problems.append("auto-dial is OFF (no one would be called)")
     if key_org is not None and row["organization_id"] != key_org:
         problems.append("belongs to a different organization than the agent key")
-    callable_count = sum(1 for a in approvers if a["is_active"] and a["has_phone"])
+    # A text policy reaches approvers by Telegram (see "Text pairing"), not by phone.
+    callable_count = sum(1 for a in approvers if a["is_active"] and (by_text or a["has_phone"]))
     if not approvers:
         problems.append("no primary approvers")
     elif callable_count < len(approvers):
         problems.append(
-            f"{len(approvers) - callable_count} of {len(approvers)} approvers inactive or "
-            "without a phone number"
+            f"{len(approvers) - callable_count} of {len(approvers)} approvers inactive"
+            + ("" if by_text else " or without a phone number")
         )
     label = f"'{row['name']}'"
     if problems:
         return Check(name, FAIL, f"{label}: " + "; ".join(problems))
+    if by_text:
+        return Check(
+            name, PASS, f"{label}: active, auto-dial on, channel text (Telegram only, no calls)"
+        )
     return Check(
         name, PASS, f"{label}: active, auto-dial on, {callable_count} callable approver(s)"
     )
+
+
+def check_text_settings(settings: Any) -> list[Check]:
+    """Text provider and its secrets, by name only (never a value)."""
+    provider = settings.text_provider
+    if provider == "disabled":
+        return [Check("Text provider", SKIP, "TEXT_PROVIDER=disabled (voice only)")]
+    secret = settings.text_callback_secret
+    secret_ok = bool(secret and len(secret.get_secret_value()) >= 32)
+    if provider == "mock":
+        return [
+            Check(
+                "Text provider",
+                WARN,
+                "TEXT_PROVIDER=mock (simulated Telegram; answer with app.cli text-simulate)",
+            ),
+            Check(
+                "Text settings",
+                PASS if secret_ok else FAIL,
+                "TEXT_CALLBACK_SECRET present" if secret_ok else "TEXT_CALLBACK_SECRET missing",
+            ),
+        ]
+    token = settings.telegram_bot_token
+    present = {
+        "TELEGRAM_BOT_TOKEN": bool(token and token.get_secret_value()),
+        "TELEGRAM_BOT_USERNAME": bool(settings.telegram_bot_username),
+        "TEXT_CALLBACK_SECRET": secret_ok,
+    }
+    missing = [name for name, ok in present.items() if not ok]
+    return [
+        Check("Text provider", PASS, "TEXT_PROVIDER=telegram"),
+        Check(
+            "Telegram settings",
+            FAIL if missing else PASS,
+            f"missing {missing}" if missing else f"{', '.join(present)} present",
+        ),
+    ]
+
+
+def check_text_pairing(
+    policy_id: UUID, channel: str, text_provider: str, linked: list[bool]
+) -> Check | None:
+    """For a guarded 'text' policy: text must be on and every approver paired."""
+    if channel != "text":
+        return None
+    name = f"Text pairing {policy_id}"
+    if text_provider == "disabled":
+        return Check(name, FAIL, "policy uses text but TEXT_PROVIDER=disabled (nobody is asked)")
+    unpaired = linked.count(False)
+    if not linked or unpaired:
+        return Check(
+            name,
+            FAIL,
+            f"{unpaired} of {len(linked)} approver(s) without a verified Telegram link "
+            "(run: python -m app.cli pair-telegram --approver-id <id>)",
+        )
+    return Check(name, PASS, f"{len(linked)} approver(s) linked to Telegram")
+
+
+def check_text_worker(count: int | None, overdue: int, text_needed: bool) -> Check:
+    name = "Text worker"
+    if count is None:
+        return Check(name, WARN, "could not list processes")
+    if count == 0:
+        return Check(
+            name,
+            FAIL if text_needed else WARN,
+            "no app.workers.text_worker process is running (start-demo.ps1 starts it)",
+        )
+    if overdue:
+        return Check(name, FAIL, f"{count} running, but {overdue} prompt(s) overdue")
+    return Check(name, PASS, f"{count} process(es), no overdue prompts")
 
 
 def check_agent_settings(sources: Mapping[str, str], settings_file: Path) -> list[Check]:
@@ -294,8 +380,9 @@ def claude_version_output() -> str | None:
     return (result.stdout + result.stderr) if result else ""
 
 
-def worker_processes() -> int | None:
-    """Count running voice workers by command line (Windows CIM; ps elsewhere)."""
+def worker_processes(module: str = "app.workers.voice_worker") -> int | None:
+    """Count running workers by command line (Windows CIM; ps elsewhere)."""
+    pattern = re.escape(module)
     if os.name == "nt":
         result = _run(
             [
@@ -303,7 +390,7 @@ def worker_processes() -> int | None:
                 "-NoProfile",
                 "-Command",
                 "@(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object "
-                "{ $_.CommandLine -match 'app\\.workers\\.voice_worker' }).Count",
+                f"{{ $_.CommandLine -match '{pattern}' }}).Count",
             ]
         )
         try:
@@ -311,7 +398,11 @@ def worker_processes() -> int | None:
         except ValueError:
             return None
     result = _run(["ps", "-eo", "args"])
-    return result.stdout.count("app.workers.voice_worker") if result else None
+    return result.stdout.count(module) if result else None
+
+
+def text_worker_processes() -> int | None:
+    return worker_processes("app.workers.text_worker")
 
 
 def read_only(engine: Engine) -> Connection:
@@ -336,6 +427,7 @@ def run_doctor(
     http: httpx.Client,
     claude_output: Callable[[], str | None] = claude_version_output,
     workers: Callable[[], int | None] = worker_processes,
+    text_workers: Callable[[], int | None] = text_worker_processes,
     check_bolna: bool = True,
     settings: Any = None,
     demo_dir: Path = DEMO_DIR,
@@ -441,6 +533,7 @@ def run_doctor(
         f"condition '{settings.bolna_condition_extraction}' (must match the Bolna agent)",
     )
     report.checks.append(check_polling(settings.voice_reconcile_after_seconds))
+    report.checks.extend(check_text_settings(settings))
 
     # 5. Database: migrations, worker signal, policies, agent key
     from alembic.config import Config
@@ -505,13 +598,14 @@ def run_doctor(
                     key_org = row["organization_id"]
                     report.checks.append(check_scopes(row["scopes"], row["revoked"]))
 
+            # Text columns exist from migration 0007 on (the Migrations check FAILs before).
+            has_text = current is not None and str(current) >= "0007"
+            policy_sql = POLICY_SQL if has_text else POLICY_SQL_BEFORE_0007
+            text_needed = False
             for policy_id in policy_ids:
                 policy = (
                     db.execute(
-                        text(
-                            "SELECT name, is_active, auto_dial, organization_id "
-                            "FROM approval_policies WHERE id = :p"
-                        ),
+                        text(policy_sql),
                         {"p": policy_id},
                     )
                     .mappings()
@@ -528,6 +622,39 @@ def run_doctor(
                     ).mappings()
                 )
                 report.checks.append(check_policy_row(policy_id, policy, approvers, key_org))
+                channel = policy["approval_channel"] if policy else "voice"
+                if channel == "text":
+                    text_needed = True
+                    linked = [
+                        bool(row[0])
+                        for row in db.execute(
+                            text(
+                                "SELECT EXISTS (SELECT 1 FROM approver_channel_links l "
+                                "WHERE l.approver_id = pa.approver_id "
+                                "AND l.channel = 'telegram' AND l.status = 'verified') "
+                                "FROM policy_approvers pa "
+                                "WHERE pa.policy_id = :p AND pa.role = 'primary'"
+                            ),
+                            {"p": policy_id},
+                        )
+                    ]
+                    pairing = check_text_pairing(policy_id, channel, settings.text_provider, linked)
+                    if pairing is not None:
+                        report.checks.append(pairing)
+
+            if settings.text_provider != "disabled":
+                overdue = (
+                    db.execute(
+                        text(
+                            "SELECT count(*) FROM text_prompts WHERE status = 'queued' "
+                            "AND run_after < now() - make_interval(secs => :s)"
+                        ),
+                        {"s": STALE_JOB_SECONDS},
+                    ).scalar()
+                    if has_text
+                    else 0
+                )
+                report.checks.append(check_text_worker(text_workers(), overdue, text_needed))
     except Exception as exc:
         report.add("Database", FAIL, f"read-only checks failed ({type(exc).__name__})")
     finally:

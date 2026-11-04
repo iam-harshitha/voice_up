@@ -104,6 +104,12 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
                 stop.wait(POLL_ERROR_BACKOFF_SECONDS)
                 continue
+            except Exception as exc:  # e.g. the database restarting: log the type only
+                logger.error("text_worker.iteration_failed", extra={"error": type(exc).__name__})
+                if args.once:
+                    return 1
+                stop.wait(POLL_ERROR_BACKOFF_SECONDS)
+                continue
             if time.monotonic() >= next_sweep:
                 text_service.close_finished_prompts(session_factory, provider)
                 next_sweep = time.monotonic() + SWEEP_EVERY_SECONDS
