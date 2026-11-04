@@ -34,8 +34,16 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings
 from app.core.errors import AppError
 from app.db.base import utcnow
-from app.db.models import ApprovalRequest, Approver, ApproverChannelLink, TextPrompt
+from app.db.models import (
+    ApprovalRequest,
+    Approver,
+    ApproverChannelLink,
+    TextPrompt,
+    VoiceCall,
+    VoiceJob,
+)
 from app.db.models.text import LinkStatus, PromptReason, PromptStatus
+from app.db.models.voice import JobStatus, JobType
 from app.db.session import transaction
 from app.domain.approval_rules import RequestStatus, VoteChoice
 from app.domain.snapshot import snapshot_channel
@@ -53,6 +61,7 @@ from app.text.base import (
     TextProviderError,
     Update,
 )
+from app.voice.base import CallStatus
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +168,44 @@ def auto_prompt(session: Session, settings: Settings, request: ApprovalRequest) 
     Runs inside the request's creation transaction; never places a call."""
     for approver_id in request.authorized_approver_ids:  # snapshot order
         prompt_or_audit(session, settings, request, approver_id, PromptReason.AUTO_DIAL)
+
+
+def _expedite_fallback_call(
+    session: Session, request: ApprovalRequest, prompt: TextPrompt, now: datetime, reason: str
+) -> None:
+    """For a text_then_voice request, move the approver's delayed call to now."""
+    if snapshot_channel(request.policy_snapshot) != "text_then_voice":
+        return
+    job = session.scalar(
+        select(VoiceJob)
+        .join(VoiceCall, VoiceJob.voice_call_id == VoiceCall.id)
+        .where(
+            VoiceCall.request_id == prompt.request_id,
+            VoiceCall.approver_id == prompt.approver_id,
+            VoiceCall.status == CallStatus.QUEUED.value,
+            VoiceJob.job_type == JobType.INITIATE_CALL,
+            VoiceJob.status == JobStatus.PENDING,
+            VoiceJob.run_after > now,
+        )
+        # A job a worker holds is already running: leave it alone.
+        .with_for_update(of=VoiceJob, skip_locked=True)
+        .limit(1)
+    )
+    if job is None:
+        return
+    job.run_after = now
+    audit_service.record_event(
+        session,
+        organization_id=prompt.organization_id,
+        request_id=prompt.request_id,
+        event_type=AuditEventType.VOICE_FALLBACK_EXPEDITED,
+        data={
+            "voice_call_id": str(job.voice_call_id),
+            "text_prompt_id": str(prompt.id),
+            "approver_id": str(prompt.approver_id),
+            "reason": reason,
+        },
+    )
 
 
 # --- Worker actions (performed after commit) ----------------------------------------------
@@ -274,6 +321,7 @@ def _claim_for_send(session: Session, settings: Settings, now: datetime) -> _Pre
             prompt.lease_expires_at = None
             if closed == "link_revoked":
                 _audit(session, prompt, AuditEventType.TEXT_PROMPT_FAILED, reason=closed)
+                _expedite_fallback_call(session, request, prompt, now, closed)
             return CLOSED_INSTEAD
         nonce = tokens.new_nonce()
         prompt.token_hash = tokens.sha256_hex(nonce)
@@ -330,6 +378,11 @@ def _finish_send(
         # A message that may have been delivered keeps no working buttons: the stored
         # hash is dropped and the next attempt mints a new one.
         prompt.token_hash = None
+        # text_then_voice: the text did not arrive, so the fallback call starts now
+        # (later retries of the message may still deliver it; the first vote wins).
+        request = session.get(ApprovalRequest, prompt.request_id)
+        if request is not None:
+            _expedite_fallback_call(session, request, prompt, now, code)
         retryable = error is None or error.kind is ErrorKind.RETRYABLE
         if retryable and prompt.attempts < settings.text_send_max_attempts:
             prompt.status = PromptStatus.QUEUED

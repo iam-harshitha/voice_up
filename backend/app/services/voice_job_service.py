@@ -26,11 +26,20 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
 from app.db.base import utcnow
-from app.db.models import ApprovalRequest, Approver, VoiceCall, VoiceJob, VoiceProviderEvent
+from app.db.models import (
+    ApprovalRequest,
+    ApprovalVote,
+    Approver,
+    VoiceCall,
+    VoiceJob,
+    VoiceProviderEvent,
+)
 from app.db.models.voice import DecisionStatus, EventStatus, JobStatus, JobType
 from app.db.session import transaction
 from app.domain.approval_rules import RequestStatus
+from app.domain.snapshot import snapshot_channel
 from app.services import audit_service
+from app.services.approval_service import seat_for
 from app.services.audit_service import AuditEventType
 from app.services.voice_webhook_service import apply_execution, requeue_unmatched_events
 from app.voice import provider_agent_id
@@ -200,6 +209,22 @@ def _end_call(
 # --- initiate_call ------------------------------------------------------------------
 
 
+def _seat_decided(session: Session, request: ApprovalRequest, approver_id: UUID) -> bool:
+    """True if this approver has voted, or the seat they would decide already has a vote."""
+    seat = seat_for(session, request, approver_id) or approver_id
+    return (
+        session.scalar(
+            select(ApprovalVote.id)
+            .where(
+                ApprovalVote.request_id == request.id,
+                or_(ApprovalVote.approver_id == approver_id, ApprovalVote.seat_approver_id == seat),
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
 def run_initiate(
     session_factory: sessionmaker[Session],
     provider: VoiceProvider,
@@ -227,6 +252,14 @@ def run_initiate(
         request = _require(session.get(ApprovalRequest, call.request_id))
         if request.status != RequestStatus.PENDING.value:
             _end_call(session, call, CallStatus.CANCELED, f"request_{request.status}")
+            _succeed(row)
+            return "canceled"
+        if snapshot_channel(request.policy_snapshot) == "text_then_voice" and _seat_decided(
+            session, request, call.approver_id
+        ):
+            # The approver answered by text (or someone decided their seat) before the
+            # fallback call's turn came. Voice-only requests keep their original behaviour.
+            _end_call(session, call, CallStatus.CANCELED, "seat_decided")
             _succeed(row)
             return "canceled"
         approver = session.get(Approver, call.approver_id)

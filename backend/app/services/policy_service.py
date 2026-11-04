@@ -30,14 +30,6 @@ POLICY_INVALID = "approval_policy_invalid"
 CHANNEL_SETTINGS = ("approval_channel", "voice_fallback_after_seconds")
 
 
-def _require_available_channel(channel: str) -> None:
-    if channel == "text_then_voice":
-        raise BusinessRuleError(
-            "approval_channel 'text_then_voice' is not available yet; use 'voice' or 'text'.",
-            code="approval_channel_unavailable",
-        )
-
-
 # --- Approvers ---------------------------------------------------------------------------
 
 
@@ -317,7 +309,6 @@ def create_policy(
             else _default_max_escalations(data.escalation_after_seconds, data.backup_approver_ids)
         ),
     )
-    _require_available_channel(data.approval_channel)
     with transaction(session):
         primaries, backups = _validate_config(session, organization_id, config)
         policy = ApprovalPolicy(
@@ -388,8 +379,6 @@ def update_policy(
     they carry their own policy snapshot.
     """
     supplied = data.model_fields_set
-    if "approval_channel" in supplied and data.approval_channel is not None:
-        _require_available_channel(data.approval_channel)
     with transaction(session):
         policy = get_policy(session, organization_id, policy_id, lock="update")
         changed: list[str] = []

@@ -43,6 +43,7 @@ class AuditEventType(StrEnum):
     VOICE_DECISION_ACCEPTED = "voice.decision_accepted"
     VOICE_DECISION_REJECTED = "voice.decision_rejected"
     VOICE_EVENT_IGNORED = "voice.event_ignored"
+    VOICE_FALLBACK_EXPEDITED = "voice.fallback_expedited"
     TEXT_PROMPT_SENT = "text.prompt_sent"
     TEXT_PROMPT_FAILED = "text.prompt_failed"
     TEXT_DECISION_ACCEPTED = "text.decision_accepted"

@@ -54,10 +54,9 @@ ApprovalModeField = Literal["unanimous", "quorum"]
 VetoModeField = Literal["any_rejection", "designated", "none"]
 DeadlineSeconds = Annotated[int, Field(ge=60, le=30 * 24 * 3600)]
 EscalationSeconds = Annotated[int, Field(ge=60, le=7 * 24 * 3600)]
-# 'text_then_voice' is accepted here and by the database, but the policy service refuses
-# it until it is built (approval_channel_unavailable).
 ApprovalChannelField = Literal["voice", "text_then_voice", "text"]
-FallbackSeconds = Annotated[int, Field(ge=10, le=3600)]
+# 'text_then_voice': seconds between the Telegram message and the fallback call.
+FallbackSeconds = Annotated[int, Field(ge=5, le=600)]
 
 
 class PolicyCreate(StrictInput):
@@ -79,7 +78,8 @@ class PolicyCreate(StrictInput):
     max_escalations: Annotated[int, Field(ge=0, le=3)] | None = None
     # Opt-in: schedule the approvers' calls automatically when a request is created.
     auto_dial: bool = False
-    # How auto_dial contacts approvers: 'voice' (calls; default) or 'text' (Telegram only).
+    # How auto_dial contacts approvers: 'voice' (calls; default), 'text' (Telegram only)
+    # or 'text_then_voice' (Telegram, then a call if undecided after the fallback delay).
     approval_channel: ApprovalChannelField = "voice"
     voice_fallback_after_seconds: FallbackSeconds = 60
 

@@ -15,7 +15,8 @@ Examples:
     python -m app.cli demo-seed --org-id <uuid> --yes [--issue-agent-key]
     python -m app.cli connect-claude --project demo-target --policy-id <uuid>
     python -m app.cli pair-telegram --approver-id <uuid>
-    python -m app.cli set-channel --policy-id <uuid> --channel text
+    python -m app.cli set-channel --policy-id <uuid> --channel text_then_voice \
+        --fallback-seconds 10
     python -m app.cli text-simulate --prompt-id <uuid> --action approve   # mock only
 """
 
@@ -46,6 +47,16 @@ _SCOPE_HELP = (
 
 class CliError(Exception):
     pass
+
+
+def _fallback_seconds(value: str) -> int:
+    try:
+        seconds = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a whole number of seconds") from None
+    if not 5 <= seconds <= 600:
+        raise argparse.ArgumentTypeError("must be between 5 and 600")
+    return seconds
 
 
 def _key_spec(value: str) -> tuple[str, str]:
@@ -189,10 +200,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     channel = commands.add_parser(
         "set-channel",
-        help="Switch a policy's approval_channel (voice or text). Audited; bumps the version.",
+        help="Switch a policy's approval_channel (voice, text or text_then_voice). Audited; "
+        "bumps the version.",
     )
     channel.add_argument("--policy-id", required=True, type=UUID)
-    channel.add_argument("--channel", required=True, choices=["voice", "text"])
+    channel.add_argument("--channel", required=True, choices=["voice", "text", "text_then_voice"])
+    channel.add_argument(
+        "--fallback-seconds",
+        type=_fallback_seconds,
+        help="text_then_voice: seconds from the Telegram message to the call (5-600; "
+        "the policy keeps its current value, default 60, if omitted).",
+    )
 
     text_sim = commands.add_parser(
         "text-simulate",
@@ -361,8 +379,11 @@ def _set_channel(args: argparse.Namespace, session) -> None:
     if org_id is None:
         raise CliError("policy not found")
     try:
+        changes: dict[str, object] = {"approval_channel": args.channel}
+        if args.fallback_seconds is not None:
+            changes["voice_fallback_after_seconds"] = args.fallback_seconds
         policy = policy_service.update_policy(
-            session, org_id, args.policy_id, PolicyUpdate(approval_channel=args.channel)
+            session, org_id, args.policy_id, PolicyUpdate(**changes)
         )
     except AppError as exc:
         raise CliError(exc.message) from exc
@@ -372,6 +393,14 @@ def _set_channel(args: argparse.Namespace, session) -> None:
     )
     if policy.approval_channel == "text":
         print("New requests under it are sent by Telegram only; no call is placed.")
+    elif policy.approval_channel == "text_then_voice":
+        print(
+            "New requests under it are sent by Telegram first; an approver who has not "
+            f"decided after {policy.voice_fallback_after_seconds} s is called. Approvers "
+            "without a verified Telegram link are called at once."
+        )
+    if not policy.auto_dial:
+        print("Note: auto-dial is OFF, so nobody is contacted automatically.")
 
 
 _TAP_ACTIONS = {"approve": "a", "reject": "r", "confirm": "c", "cancel": "x"}

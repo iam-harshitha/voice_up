@@ -56,7 +56,7 @@ class ApprovalPolicy(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
             name="approval_channel_valid",
         ),
         CheckConstraint(
-            "voice_fallback_after_seconds BETWEEN 10 AND 3600", name="voice_fallback_range"
+            "voice_fallback_after_seconds BETWEEN 5 AND 600", name="voice_fallback_range"
         ),
         UniqueConstraint("id", "organization_id"),
         Index("ix_approval_policies_organization_id_is_active", "organization_id", "is_active"),
@@ -83,12 +83,12 @@ class ApprovalPolicy(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     # policy (instead of waiting for an explicit "Schedule calls").
     auto_dial: Mapped[bool] = mapped_column(default=False, server_default=false())
     # How approvers are contacted when auto_dial runs: 'voice' (default, phone calls),
-    # 'text' (Telegram buttons only, never a call) or 'text_then_voice' (reserved: the
-    # schema accepts it, the API refuses it until it is built).
+    # 'text' (Telegram buttons only, never a call) or 'text_then_voice' (Telegram first,
+    # then a call after voice_fallback_after_seconds if the seat is still undecided).
     approval_channel: Mapped[str] = mapped_column(
         String(16), default="voice", server_default="voice"
     )
-    # For 'text_then_voice': seconds to wait for a text answer before calling (reserved).
+    # For 'text_then_voice': seconds to wait for a text answer before calling (5-600).
     voice_fallback_after_seconds: Mapped[int] = mapped_column(default=60, server_default="60")
     is_active: Mapped[bool] = mapped_column(default=True, server_default=true())
     version: Mapped[int] = mapped_column(default=1, server_default="1")

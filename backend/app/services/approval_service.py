@@ -559,6 +559,9 @@ def _seat_for(session: Session, request: ApprovalRequest, approver_id: UUID) -> 
     )
 
 
+seat_for = _seat_for  # public name for other services (read-only lookup)
+
+
 def _pending_reapprover(session: Session, request: ApprovalRequest, seat: UUID) -> UUID | None:
     """The approver whose satisfied condition on an undecided seat awaits re-approval."""
     return session.scalar(

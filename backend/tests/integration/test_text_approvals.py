@@ -37,7 +37,6 @@ from tests.helpers import (
     create_approver,
     get_request,
     make_policy,
-    post_policy,
     schedule_calls,
     vote,
 )
@@ -464,19 +463,10 @@ def test_no_path_dials_a_text_request(world, text_settings, session_factory, ses
     assert count(session, VoiceCall) == 0
 
 
-def test_text_then_voice_is_not_available_yet(text_client, tenant):
+def test_policies_default_to_voice_with_a_60_second_fallback(text_client, tenant):
     alice = create_approver(text_client, tenant, "Alice", phone_number="+14155550101")
-    response = post_policy(text_client, tenant, [alice["id"]], approval_channel="text_then_voice")
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "approval_channel_unavailable"
     policy = make_policy(text_client, tenant, [alice["id"]])
     assert (policy["approval_channel"], policy["voice_fallback_after_seconds"]) == ("voice", 60)
-    patched = text_client.patch(
-        f"{API}/policies/{policy['id']}",
-        json={"approval_channel": "text_then_voice"},
-        headers=tenant.admin,
-    )
-    assert patched.status_code == 400
 
 
 def test_set_channel_cli_switches_and_audits(

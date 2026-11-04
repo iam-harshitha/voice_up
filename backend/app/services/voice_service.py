@@ -1,7 +1,9 @@
 """Scheduling and reading voice approval calls (organization-scoped)."""
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -57,8 +59,12 @@ def create_call(
     *,
     reason: str,
     allow_redial: bool = False,
+    start_after: datetime | None = None,
 ) -> tuple[VoiceCall | None, str | None]:
     """Create one intended call and its initiation job inside the caller's transaction.
+
+    ``start_after`` (text_then_voice only) delays the dial: the initiation job runs then,
+    and cancels itself if the request was decided or the approver's seat voted meanwhile.
 
     The caller must hold the request row lock. This is the only place calls are created
     (scheduling, escalation, re-approval), so the duplicate-call and generation limits
@@ -104,25 +110,29 @@ def create_call(
     )
     session.add(call)
     session.flush()
-    session.add(
-        VoiceJob(
-            job_type=JobType.INITIATE_CALL,
-            voice_call_id=call.id,
-            max_attempts=settings.voice_job_max_attempts,
-        )
+    job = VoiceJob(
+        job_type=JobType.INITIATE_CALL,
+        voice_call_id=call.id,
+        max_attempts=settings.voice_job_max_attempts,
     )
+    if start_after is not None:
+        job.run_after = start_after
+    session.add(job)
+    data = {
+        "voice_call_id": str(call.id),
+        "approver_id": str(approver_id),
+        "generation": call.generation,
+        "provider": call.provider,
+        "reason": reason,
+    }
+    if start_after is not None:  # only for delayed calls: voice audit data is unchanged
+        data["start_after"] = start_after.isoformat()
     audit_service.record_event(
         session,
         organization_id=request.organization_id,
         request_id=request.id,
         event_type=AuditEventType.VOICE_CALL_SCHEDULED,
-        data={
-            "voice_call_id": str(call.id),
-            "approver_id": str(approver_id),
-            "generation": call.generation,
-            "provider": call.provider,
-            "reason": reason,
-        },
+        data=data,
     )
     return call, None
 
@@ -208,9 +218,11 @@ def _schedule_locked(
     *,
     redial_unanswered: bool,
     reason: str,
+    start_after: Mapping[UUID, datetime] | None = None,
 ) -> ScheduleResult:
     """Create the calls for an open request whose row the caller has locked (or has just
-    inserted). Shared by the operator's "Schedule calls" and by auto-dial."""
+    inserted). Shared by the operator's "Schedule calls" and by auto-dial.
+    ``start_after`` maps approvers to a delayed start (text_then_voice)."""
     votes = session.scalars(select(ApprovalVote).where(ApprovalVote.request_id == request.id)).all()
     already_voted = {v.approver_id for v in votes}
     decided_seats = {v.seat_approver_id for v in votes}
@@ -235,7 +247,13 @@ def _schedule_locked(
             and previous.decision_status != DecisionStatus.ACCEPTED
         )
         call, skipped = create_call(
-            session, settings, request, approver_id, reason=reason, allow_redial=redial
+            session,
+            settings,
+            request,
+            approver_id,
+            reason=reason,
+            allow_redial=redial,
+            start_after=(start_after or {}).get(approver_id),
         )
         if call is not None:
             result.calls.append(call)
@@ -252,7 +270,12 @@ def _schedule_locked(
 
 
 def auto_dial(
-    session: Session, settings: Settings, request: ApprovalRequest, policy: ApprovalPolicy
+    session: Session,
+    settings: Settings,
+    request: ApprovalRequest,
+    policy: ApprovalPolicy,
+    *,
+    start_after: Mapping[UUID, datetime] | None = None,
 ) -> None:
     """Schedule a NEW request's calls when its policy opts in (``auto_dial``).
 
@@ -270,7 +293,12 @@ def auto_dial(
         try:
             with session.begin_nested():
                 result = _schedule_locked(
-                    session, settings, request, redial_unanswered=False, reason="auto_dial"
+                    session,
+                    settings,
+                    request,
+                    redial_unanswered=False,
+                    reason="auto_dial",
+                    start_after=start_after,
                 )
         except AppError as exc:
             reason = exc.code
@@ -288,6 +316,12 @@ def auto_dial(
                     "calls_created": result.created,
                     "voice_call_ids": [str(call.id) for call in result.calls],
                     "skipped": result.skipped,
+                    # Only for text_then_voice, so voice audit data is unchanged.
+                    **(
+                        {"delayed_approver_ids": [str(a) for a in start_after]}
+                        if start_after
+                        else {}
+                    ),
                 },
             )
             return

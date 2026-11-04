@@ -66,7 +66,7 @@ def test_the_database_enforces_the_new_checks(engine, client, tenant):
     policy = make_policy(client, tenant, [alice])
     for statement in (
         "UPDATE approval_policies SET approval_channel = 'sms' WHERE id = :p",
-        "UPDATE approval_policies SET voice_fallback_after_seconds = 5 WHERE id = :p",
+        "UPDATE approval_policies SET voice_fallback_after_seconds = 4 WHERE id = :p",
     ):
         with pytest.raises(DBAPIError), engine.begin() as connection:
             connection.execute(text(statement), {"p": policy["id"]})
