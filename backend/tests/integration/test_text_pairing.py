@@ -237,3 +237,49 @@ def test_pair_telegram_cli_prints_a_one_time_link(
     assert cli_main(["pair-telegram", "--approver-id", alice["id"]]) == 0
     out = capsys.readouterr().out
     assert "https://t.me/approval_line_mock_bot?start=" in out and "Alice" in out
+
+
+class _FakeTelegram:
+    def __init__(self, username: str) -> None:
+        self.username, self.closed = username, False
+
+    def get_me(self) -> str:
+        return self.username
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _telegram_settings(text_settings):
+    from pydantic import SecretStr
+
+    return text_settings.model_copy(
+        update={
+            "text_provider": "telegram",
+            "telegram_bot_token": SecretStr("123456789:" + "P" * 35),
+            "telegram_bot_username": "Ready57",
+        }
+    )
+
+
+def test_pair_telegram_refuses_a_username_that_is_not_the_tokens_bot(
+    text_client, tenant, alice, text_settings, session, capsys
+):
+    """Regression: TELEGRAM_BOT_USERNAME=Ready57 for the bot @Ready57Bot made every
+    pairing link open another account, so Start never reached the bot."""
+    import argparse
+
+    from app.cli import CliError, _pair_telegram
+
+    settings = _telegram_settings(text_settings)
+    fake = _FakeTelegram("Ready57Bot")
+    args = argparse.Namespace(approver_id=UUID(alice["id"]))
+    with pytest.raises(CliError, match="TELEGRAM_BOT_USERNAME=Ready57Bot"):
+        _pair_telegram(args, settings, session, telegram=fake)
+    assert fake.closed
+    assert "t.me" not in capsys.readouterr().out  # no misleading link is printed
+    assert links(session, alice["id"]) == []  # and no pairing code is issued
+
+    fixed = settings.model_copy(update={"telegram_bot_username": "Ready57Bot"})
+    _pair_telegram(args, fixed, session, telegram=_FakeTelegram("Ready57Bot"))
+    assert "https://t.me/Ready57Bot?start=" in capsys.readouterr().out

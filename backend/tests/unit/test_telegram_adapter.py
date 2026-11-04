@@ -159,3 +159,24 @@ def test_the_token_never_reaches_the_logs(caplog, capsys):
     assert FAKE_TOKEN not in caplog.text
     assert FAKE_TOKEN not in capsys.readouterr().out
     assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+
+
+def test_get_me_returns_the_bots_real_username():
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        return ok({"id": 1, "is_bot": True, "username": "Ready57Bot"})
+
+    assert provider(handler).get_me() == "Ready57Bot"
+    assert seen["path"].endswith("/getMe")
+
+
+def test_a_username_that_is_not_the_tokens_bot_is_reported_with_the_fix():
+    from app.text.telegram import username_mismatch
+
+    assert username_mismatch("Ready57Bot", "Ready57Bot") is None
+    assert username_mismatch("ready57bot", "Ready57Bot") is None  # usernames ignore case
+    problem = username_mismatch("Ready57", "Ready57Bot")
+    assert problem is not None and "TELEGRAM_BOT_USERNAME=Ready57Bot" in problem
+    assert FAKE_TOKEN not in problem

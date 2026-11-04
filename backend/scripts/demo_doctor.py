@@ -210,6 +210,38 @@ def check_policy_row(
     )
 
 
+def check_telegram_bot(configured: str | None, actual: str | None, error: str | None) -> Check:
+    """TELEGRAM_BOT_USERNAME must be the token's bot, or pairing links open someone else."""
+    from app.text.telegram import username_mismatch
+
+    name = "Telegram bot"
+    if actual is None:
+        return Check(name, WARN, f"could not confirm the bot with getMe ({error})")
+    problem = username_mismatch(configured, actual)
+    if problem:
+        return Check(name, FAIL, problem)
+    return Check(name, PASS, f"token belongs to @{actual} (pairing links use it)")
+
+
+def telegram_get_me(http: httpx.Client, settings: Any) -> tuple[str | None, str | None]:
+    """(username, None) or (None, safe error). The URL holds the token: never reported."""
+    token = settings.telegram_bot_token.get_secret_value()
+    try:
+        response = http.get(
+            f"{settings.telegram_api_base_url.rstrip('/')}/bot{token}/getMe", timeout=10
+        )
+        body = response.json()
+    except httpx.HTTPError as exc:
+        return None, type(exc).__name__
+    except ValueError:
+        return None, f"HTTP {response.status_code}"
+    result = body.get("result") if isinstance(body, dict) and body.get("ok") else None
+    username = result.get("username") if isinstance(result, dict) else None
+    if not isinstance(username, str):
+        return None, f"HTTP {response.status_code}"
+    return username, None
+
+
 def check_text_settings(settings: Any) -> list[Check]:
     """Text provider and its secrets, by name only (never a value)."""
     provider = settings.text_provider
@@ -708,6 +740,12 @@ def run_doctor(
             if status == 401
             else f"unexpected: {status or detail}",
         )
+
+    # 6b. Telegram bot identity (one read-only getMe; sends nothing)
+    token = settings.telegram_bot_token
+    if settings.text_provider == "telegram" and token and token.get_secret_value():
+        username, error = telegram_get_me(http, settings)
+        report.checks.append(check_telegram_bot(settings.telegram_bot_username, username, error))
 
     # 7. Bolna agent (one read-only GET; no call)
     if not check_bolna or settings.voice_provider != "bolna" or missing:

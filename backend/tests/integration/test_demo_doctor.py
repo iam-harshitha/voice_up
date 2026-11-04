@@ -54,8 +54,15 @@ def bolna_settings(test_settings):
 class Network:
     """API, tunnel and Bolna as one mock transport. Records every request."""
 
-    def __init__(self, *, bolna_url=TUNNEL + doctor.WEBHOOK_PATH, bolna_token=WEBHOOK_TOKEN):
+    def __init__(
+        self,
+        *,
+        bolna_url=TUNNEL + doctor.WEBHOOK_PATH,
+        bolna_token=WEBHOOK_TOKEN,
+        bot="approval_line_test_bot",
+    ):
         self.seen: list[str] = []
+        self.bot = bot
         self.bolna_url = bolna_url
         self.bolna_token = bolna_token
 
@@ -69,6 +76,8 @@ class Network:
         if path == doctor.WEBHOOK_PATH:
             assert "X-Approval-Line-Webhook-Token" not in request.headers
             return httpx.Response(401, json={"error": {"code": "webhook_unauthorized"}})
+        if path.endswith("/getMe"):
+            return httpx.Response(200, json={"ok": True, "result": {"username": self.bot}})
         if path.startswith("/v2/agent/"):
             return httpx.Response(
                 200,
@@ -421,3 +430,18 @@ def test_a_text_policy_with_text_disabled_fails(world):
     report, _, _ = world["run"]()
     (pairing,) = by_name(report, "Text pairing")
     assert pairing.status == "FAIL" and "TEXT_PROVIDER=disabled" in pairing.detail
+
+
+def test_a_bot_username_that_is_not_the_tokens_bot_fails(world):
+    """Regression: the configured username must be the bot the token belongs to."""
+    report, output, network = world["run"](
+        settings_update=TELEGRAM_SETTINGS, network=Network(bot="Ready57Bot")
+    )
+    (bot,) = by_name(report, "Telegram bot")
+    assert bot.status == "FAIL" and "TELEGRAM_BOT_USERNAME=Ready57Bot" in bot.detail
+    assert not report.ready
+    assert any(line.endswith("/getMe") for line in network.seen)
+    assert TELEGRAM_TOKEN not in output  # the getMe URL holds the token; the report never
+
+    report, _, _ = world["run"](settings_update=TELEGRAM_SETTINGS)
+    assert by_name(report, "Telegram bot")[0].status == "PASS"

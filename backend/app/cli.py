@@ -302,7 +302,27 @@ def _voice_simulate(args: argparse.Namespace, settings) -> None:
         raise CliError("the API did not accept the simulated webhook")
 
 
-def _pair_telegram(args: argparse.Namespace, settings, session) -> None:
+def _check_bot_username(settings, telegram=None) -> None:
+    """Refuse to print a pairing link that would open another Telegram account."""
+    from app.text.base import TextProviderError
+    from app.text.telegram import TelegramProvider, username_mismatch
+
+    provider = telegram or TelegramProvider(settings)
+    try:
+        actual = provider.get_me()
+    except TextProviderError as exc:
+        raise CliError(
+            f"could not confirm the bot with Telegram (getMe: {exc.code}); check "
+            "TELEGRAM_BOT_TOKEN and the network"
+        ) from None
+    finally:
+        provider.close()
+    problem = username_mismatch(settings.telegram_bot_username, actual)
+    if problem:
+        raise CliError(problem)
+
+
+def _pair_telegram(args: argparse.Namespace, settings, session, telegram=None) -> None:
     from sqlalchemy import select
 
     from app.db.models import Approver
@@ -312,6 +332,8 @@ def _pair_telegram(args: argparse.Namespace, settings, session) -> None:
     session.rollback()
     if approver is None:
         raise CliError("approver not found")
+    if settings.text_provider == "telegram":
+        _check_bot_username(settings, telegram)
     try:
         pairing = channel_link_service.start_pairing(
             session, settings, approver.organization_id, approver.id

@@ -200,3 +200,9 @@ def test_a_text_policy_needs_no_phone_numbers():
     assert doctor.check_policy_row(pid, row, no_phone, org).status == "FAIL"
     text_row = {**row, "approval_channel": "text"}
     assert doctor.check_policy_row(pid, text_row, no_phone, org).status == "PASS"
+
+
+def test_telegram_bot_check():
+    assert doctor.check_telegram_bot("Ready57", "Ready57Bot", None).status == "FAIL"
+    assert doctor.check_telegram_bot("Ready57Bot", "Ready57Bot", None).status == "PASS"
+    assert doctor.check_telegram_bot("Ready57Bot", None, "ConnectError").status == "WARN"

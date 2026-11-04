@@ -101,6 +101,21 @@ def parse_updates(payload: Any) -> UpdateBatch:
     return UpdateBatch(updates, highest + 1 if highest is not None else None)
 
 
+def username_mismatch(configured: str | None, actual: str) -> str | None:
+    """A fix message when TELEGRAM_BOT_USERNAME is not the token's bot, else None.
+
+    Pairing links are t.me/<TELEGRAM_BOT_USERNAME>?start=<code>; with the wrong username
+    they open some other Telegram account, and Start never reaches this bot.
+    """
+    if (configured or "").lower() == actual.lower():
+        return None
+    return (
+        f"TELEGRAM_BOT_USERNAME is '{configured}' but the bot token belongs to @{actual}: "
+        f"pairing links would open a different Telegram account. Set "
+        f"TELEGRAM_BOT_USERNAME={actual} in backend/.env and restart the API and text worker."
+    )
+
+
 def keyboard(buttons: tuple[Button, ...]) -> dict[str, Any]:
     """One row of inline buttons (an empty keyboard removes the buttons)."""
     return {"inline_keyboard": [[{"text": b.label, "callback_data": b.data} for b in buttons]]}
@@ -177,6 +192,14 @@ class TelegramProvider:
             "answerCallbackQuery",
             {"callback_query_id": callback_id, "text": text[:MAX_CALLBACK_ANSWER]},
         )
+
+    def get_me(self) -> str:
+        """The bot's real @username, as Telegram knows it for this token."""
+        result = self._call("getMe", {})
+        username = result.get("username") if isinstance(result, dict) else None
+        if not isinstance(username, str) or not username:
+            raise TextProviderError(ErrorKind.RETRYABLE, "malformed_response")
+        return username
 
     def get_updates(self, offset: int | None, timeout: int) -> UpdateBatch:
         payload: dict[str, Any] = {"timeout": timeout, "allowed_updates": _ALLOWED_UPDATES}
