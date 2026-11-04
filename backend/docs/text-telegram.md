@@ -13,7 +13,28 @@ Everything is **off by default** and additive:
   before; `tests/integration/test_voice_channel_regression.py` pins their jobs and audit
   events.
 
-**Status:** mock-verified only. The live Telegram path has not been run yet.
+**Status:** Telegram approve and reject were verified live on 2026-11-04. The security
+checks and `text_then_voice` are mock-verified.
+
+## Text first, then voice (`text_then_voice`)
+
+- **The delayed call** is an ordinary call whose initiation job runs at
+  `now + voice_fallback_after_seconds`. When its turn comes it cancels itself if the
+  request is no longer pending, or if the approver's own seat has already voted (outcome
+  `seat_decided`). The seat check applies only to `text_then_voice` requests; voice-only
+  requests behave exactly as before.
+- **If the message cannot be sent** (any send error, or a revoked link), the delayed call
+  is moved to now (`voice.fallback_expedited`). A retried message may still arrive.
+- **Both channels can answer, and the first valid vote wins.**
+  - A tap after the call has started is recorded normally. The call's later answer is then
+    refused and audited (`voice.decision_rejected`, `vote_conflict`), or recorded once if
+    it is the same decision (`vote_already_recorded`).
+  - A spoken decision first makes a later tap "Not accepted." (`request_closed`, or
+    `vote_conflict` while other seats are still open).
+- **Escalation and re-approval** of a `text_then_voice` request use calls.
+- **The guard must outlast the fallback and a whole call.** With the default 300 s guard
+  wait, fallbacks up to about 60 s are covered. The doctor's `Voice fallback` check prints
+  the guard wait needed (fallback + about 240 s).
 
 ## Behaviour
 
@@ -21,7 +42,7 @@ Everything is **off by default** and additive:
 |---|---|
 | `voice` (default) | Calls are scheduled exactly as before. |
 | `text` | One Telegram prompt per primary approver with a verified link. **No call is ever placed**, even with `auto_dial` on. |
-| `text_then_voice` | Accepted by the database. The API refuses it with `approval_channel_unavailable` (not built yet). |
+| `text_then_voice` | A Telegram prompt now and, for each approver who got one, a call delayed by `voice_fallback_after_seconds` (5-600, default 60). Approvers without a verified link, or with text off, are called at once. |
 
 - **The channel is frozen** in the request's snapshot (`approval_channel`, written only
   for non-voice policies).

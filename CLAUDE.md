@@ -25,8 +25,9 @@ from approvers' votes, and the agent reads back `pending` / `approved` / `reject
   artifacts (`backend/docs/deployment.md`, `security.md`, `demo-runbook.md`).
 
 - **Text approvals (Telegram; in progress on `feature/text-approvals`, mock-verified):**
-  migration 0007, policy `approval_channel` (`voice` default / `text`; `text_then_voice`
-  reserved and refused by the API), pairing, text worker (`backend/docs/text-telegram.md`).
+  migrations 0007/0008, policy `approval_channel` (`voice` default / `text` /
+  `text_then_voice` with a delayed fallback call), pairing, text worker
+  (`backend/docs/text-telegram.md`).
 
 Don't build later-chunk features while working on an earlier one.
 
@@ -190,6 +191,9 @@ Text approval invariants (see `backend/docs/text-telegram.md`):
   snapshot gets `approval_channel` only for non-voice policies.
 - A `text` request is never dialled: `voice_service.create_call` returns `text_channel`
   for it on every path; escalation and re-approval go by Telegram instead.
+- `text_then_voice`: the fallback call is created with `start_after`; `run_initiate`
+  cancels it if the request is decided or (text_then_voice only) the approver's seat has
+  voted. A text send failure expedites it. The first valid vote per seat wins.
 - A tap is only a vote through `approval_service.record_vote(source="telegram")`. Tap
   checks run in a fixed order (signature, unused, not expired, sender/chat match the
   verified link, request pending) in ONE transaction that locks the request, then the
