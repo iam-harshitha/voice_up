@@ -1,5 +1,6 @@
 """Centralised, validated application settings loaded from the environment."""
 
+import re
 from functools import lru_cache
 from typing import Annotated, Literal, Self
 
@@ -9,6 +10,8 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 REQUIRED_DIALECT = "postgresql+psycopg"
+_BOT_USERNAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{4,31}")
+_BOT_TOKEN = re.compile(r"[0-9]{5,20}:[A-Za-z0-9_-]{30,64}")
 
 
 def _validate_database_url(value: str) -> str:
@@ -78,6 +81,70 @@ class Settings(BaseSettings):
     # Development only: directory where the mock provider keeps simulated executions so
     # the API, worker and CLI processes can share them.
     voice_mock_state_dir: str | None = None
+
+    # --- Text approvals (Telegram) ---------------------------------------------------
+    # "disabled" (default) turns text off; "mock" is for tests and local development
+    # only and is refused in production; "telegram" needs the bot settings below.
+    text_provider: Literal["disabled", "mock", "telegram"] = "disabled"
+    telegram_api_base_url: str = "https://api.telegram.org"
+    # From @BotFather. It is part of every Telegram API URL, so it is never logged.
+    telegram_bot_token: SecretStr | None = None
+    # The bot's @username (without the @), used to build t.me pairing links.
+    telegram_bot_username: str | None = None
+    # HMAC key for the buttons' callback tokens (at least 32 characters).
+    text_callback_secret: SecretStr | None = None
+    # A prompt's buttons stop working after this long (or at the request's deadline).
+    text_prompt_ttl_seconds: int = Field(default=900, ge=60, le=24 * 3600)
+    # Long-poll wait for Telegram updates; also the worst-case delay before sending.
+    text_poll_timeout_seconds: int = Field(default=3, ge=1, le=30)
+    text_http_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    text_send_max_attempts: int = Field(default=3, ge=1, le=10)
+    # Development only: where the mock provider keeps messages and simulated taps so the
+    # text worker and the text-simulate CLI can share them.
+    text_mock_state_dir: str | None = None
+
+    @field_validator("telegram_bot_username", mode="before")
+    @classmethod
+    def _clean_bot_username(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip().removeprefix("@")
+            return value or None
+        return value
+
+    @field_validator("telegram_bot_username")
+    @classmethod
+    def _check_bot_username(cls, value: str | None) -> str | None:
+        if value is not None and not _BOT_USERNAME.fullmatch(value):
+            raise ValueError("must be a Telegram bot username (5-32 letters, digits or _)")
+        return value
+
+    @model_validator(mode="after")
+    def _check_text_configuration(self) -> Self:
+        if self.text_provider == "disabled":
+            return self
+        if self.text_provider == "mock" and self.app_env == "production":
+            raise ValueError("TEXT_PROVIDER=mock is not allowed when APP_ENV=production")
+        secret = self.text_callback_secret
+        if secret is None or len(secret.get_secret_value()) < 32:
+            raise ValueError(
+                f"TEXT_PROVIDER={self.text_provider} requires TEXT_CALLBACK_SECRET "
+                "(at least 32 characters)"
+            )
+        if self.text_provider == "telegram":
+            token = self.telegram_bot_token
+            if token is None or not token.get_secret_value():
+                raise ValueError("TEXT_PROVIDER=telegram requires TELEGRAM_BOT_TOKEN")
+            # The message never includes the value.
+            if not _BOT_TOKEN.fullmatch(token.get_secret_value()):
+                raise ValueError("TELEGRAM_BOT_TOKEN does not look like a BotFather token")
+            if not self.telegram_bot_username:
+                raise ValueError("TEXT_PROVIDER=telegram requires TELEGRAM_BOT_USERNAME")
+            if not self.telegram_api_base_url.startswith("https://"):
+                raise ValueError("TELEGRAM_API_BASE_URL must use https")
+        # The long poll must finish well inside one HTTP read timeout.
+        if self.text_http_timeout_seconds <= self.text_poll_timeout_seconds:
+            raise ValueError("TEXT_HTTP_TIMEOUT_SECONDS must exceed TEXT_POLL_TIMEOUT_SECONDS")
+        return self
 
     @field_validator("database_url")
     @classmethod

@@ -56,6 +56,10 @@ def configure_logging(level: str) -> None:
     root.setLevel(level)
     # Uvicorn's access log includes query strings; our middleware logs requests instead.
     logging.getLogger("uvicorn.access").disabled = True
+    # httpx logs every request URL at INFO, and Telegram puts the bot token in the URL
+    # path: keep HTTP client libraries at WARNING so no token ever reaches a log.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 class RequestContextMiddleware:

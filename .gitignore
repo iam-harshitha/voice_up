@@ -29,6 +29,7 @@ Thumbs.db
 
 # Local mock voice state (development only)
 .mock_voice/
+.mock_text/
 
 # Demo agent execution records (simulated deployments)
 .demo_runs/
