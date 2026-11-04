@@ -13,13 +13,16 @@ Examples:
         --name "Ops Lead" --scopes "requests:read,requests:create,policies:read,..."
     python -m app.cli disable-dashboard-user --email ops@example.com
     python -m app.cli demo-seed --org-id <uuid> --yes [--issue-agent-key]
+    python -m app.cli connect-claude --project demo-target --policy-id <uuid>
 """
 
 import argparse
 import getpass
 import os
+import subprocess
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -148,7 +151,64 @@ def _build_parser() -> argparse.ArgumentParser:
         "--status", default="completed", help="Final Bolna status (e.g. completed, no-answer)."
     )
     simulate.add_argument("--api-url", default="http://127.0.0.1:8000")
+
+    connect = commands.add_parser(
+        "connect-claude",
+        help="Connect a Claude Code project (e.g. demo-target) to a policy: no env vars needed.",
+        description=(
+            "Checks the API, issues a guard key (requests:create, requests:read, "
+            "policies:read), writes <project>/.claude/settings.local.json and "
+            "<project>/guard-rules.json (both must be git-ignored), revokes the project's "
+            "previous guard key, then runs the demo doctor. The key is never printed."
+        ),
+    )
+    connect.add_argument(
+        "--project",
+        default="demo-target",
+        help="Claude Code project folder; a relative path is tried from here, then from "
+        "the repository root (default: demo-target).",
+    )
+    connect.add_argument("--policy-id", required=True, type=UUID)
+    connect.add_argument("--api-url", default="http://127.0.0.1:8000")
+    connect.add_argument("--no-doctor", action="store_true", help="Skip the doctor run.")
+    connect.add_argument("--no-bolna", action="store_true", help="Doctor: skip the Bolna GET.")
     return parser
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+
+def _project_dir(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or path.exists():
+        return path
+    return BACKEND_DIR.parent / path
+
+
+def _connect_claude(args: argparse.Namespace, session, http=None) -> int:
+    import httpx
+
+    from app.connect_claude import ConnectError, connect, describe
+
+    project = _project_dir(args.project)
+    try:
+        with httpx.Client(follow_redirects=False) if http is None else http as client:
+            result = connect(
+                session,
+                project_dir=project,
+                policy_id=args.policy_id,
+                api_url=args.api_url,
+                http=client,
+            )
+    except ConnectError as exc:
+        raise CliError(exc.message) from None
+    print("\n".join(describe(result)))
+    if args.no_doctor:
+        return 0
+    print("\nRunning the demo doctor (read-only) for this project...\n", flush=True)
+    argv = [sys.executable, str(BACKEND_DIR / "scripts" / "demo_doctor.py")]
+    argv += ["--project", str(result.project_dir)] + (["--no-bolna"] if args.no_bolna else [])
+    return subprocess.run(argv, cwd=BACKEND_DIR, check=False).returncode  # noqa: S603
 
 
 def _voice_simulate(args: argparse.Namespace, settings) -> None:
@@ -260,7 +320,7 @@ def _print_issued(key: IssuedApiKey) -> None:
     print(f"  key:    {key.plaintext}")
 
 
-def _run(args: argparse.Namespace) -> None:
+def _run(args: argparse.Namespace) -> int:
     try:
         settings = get_settings()
     except ValidationError as exc:
@@ -269,10 +329,12 @@ def _run(args: argparse.Namespace) -> None:
         ) from exc
     if args.command == "voice-simulate":
         _voice_simulate(args, settings)
-        return
+        return 0
     engine = build_engine(settings)
     session = build_session_factory(engine)()
     try:
+        if args.command == "connect-claude":
+            return _connect_claude(args, session)
         if args.command == "create-org":
             with transaction(session):
                 organization = api_key_service.create_organization(session, args.name)
@@ -319,6 +381,7 @@ def _run(args: argparse.Namespace) -> None:
     finally:
         session.close()
         engine.dispose()
+    return 0
 
 
 def _print_warning() -> None:
@@ -332,14 +395,13 @@ def _print_warning() -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        _run(args)
+        return _run(args)
     except (CliError, ValueError, AppError) as exc:
         print(f"error: {getattr(exc, 'message', exc)}", file=sys.stderr)
         return 2
     except SQLAlchemyError as exc:
         print(f"error: database operation failed ({type(exc).__name__})", file=sys.stderr)
         return 1
-    return 0
 
 
 if __name__ == "__main__":
