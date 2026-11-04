@@ -56,6 +56,13 @@ blocks on anything else), and how long a stderr message may be (the guard keeps 
 
 ## Configuration
 
+`python -m app.cli connect-claude --project demo-target --policy-id <id>` writes the
+first three into the project's git-ignored `.claude/settings.local.json` (`env` block) and
+writes `guard-rules.json`. Claude Code passes that block to the hook and to MCP servers and
+it wins over the variables of the window Claude Code started in (verified on Claude Code
+2.1.316). `.mcp.json` must not use `"${APPROVAL_LINE_API_KEY}"`-style entries: those expand
+from the window's variables only and would override the inherited values.
+
 | Environment variable | Required | Meaning |
 |---|---|---|
 | `APPROVAL_LINE_API_URL`, `APPROVAL_LINE_API_KEY` | for matching commands | Agent key with `requests:create`, `requests:read`, plus `policies:read` for the auto-dial check. **No voice scope** |
@@ -145,8 +152,9 @@ request and a new phone call.
 | Approval for a different action, summary, policy or request | block | "the approval does not match this command (reason)." |
 | Policy has auto-dial off | block, before any request | "policy 'X' (id) has auto-dial off, so no one would be called." (allowed with the manual-dial override) |
 | Policy unreadable (no `policies:read`, 404, older backend) | warning only, continue | "warning: could not read policy ...". Advisory: everything after it still fails closed |
-| `APPROVAL_LINE_API_URL` or `_API_KEY` missing | block, matching commands only | "configuration error: ... is not set." |
-| Rules variable or file missing, unreadable or invalid | block, **every** shell command | "... rules file ... is invalid (first problem)." |
+| `APPROVAL_LINE_API_URL` or `_API_KEY` missing | block, matching commands only | "configuration error: ... is not set." plus the connect-claude fix |
+| Matching command without a `tool_use_id` in the hook input | block, before any request | "... has no tool_use_id ..." (no session+command fallback: it could replay an earlier approval) |
+| Rules variable or file missing, unreadable or invalid | block, **every** shell command | "... rules file ... is invalid (first problem)." A missing variable adds the connect-claude fix |
 | Invalid `APPROVAL_LINE_GUARD_TIMEOUT_SECONDS` | block | names the variable and its range |
 | Unparsable hook input | block | "the hook input ... is not valid JSON." |
 | Any unexpected exception or interrupt | block | "unexpected error (ExceptionType)." |

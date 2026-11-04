@@ -36,70 +36,68 @@ when a command is blocked, never to retry it or work around it.
 
 ## Setup (Windows PowerShell)
 
-1. **Create an agent key for the guard** (from `backend/`). It needs no voice scope:
+1. **Connect this project** (once, from `backend/`, with the API running):
    ```powershell
-   ..\env\Scripts\python.exe -m app.cli create-key --org-id <org-id> --name claude-code-guard --scopes "requests:create,requests:read,policies:read"
+   ..\env\Scripts\python.exe -m app.cli connect-claude --project demo-target --policy-id <policy-id>
    ```
-   The key is printed once. Keep it out of files and out of git.
-   `policies:read` is only for the auto-dial check; without it the guard warns and goes on.
+   It checks the API and the policy (active, auto-dial on), issues a `claude-code-guard`
+   key with only `requests:create,requests:read,policies:read`, and writes two
+   git-ignored files (it refuses if they are not ignored):
+   - `.claude/settings.local.json`: an `env` block with `APPROVAL_LINE_API_URL`,
+     `APPROVAL_LINE_API_KEY` and `APPROVAL_LINE_GUARD_RULES`. Claude Code hands these to
+     the hook and the MCP server, and they win over any variables in your window. So
+     **no window needs anything set by hand**.
+   - `guard-rules.json`: `guard-rules.example.json` with the policy ID filled in. A rule
+     may add `"tools": ["PowerShell"]` (or `["Bash"]`) to apply to one shell only.
 
-2. **Create your rules file** (from `demo-target/`):
-   ```powershell
-   Copy-Item guard-rules.example.json guard-rules.json
-   ```
-   Replace `<DEPLOY_POLICY_ID>`, `<GIT_PUSH_POLICY_ID>` and `<DELETE_POLICY_ID>` with
-   policy UUIDs. They may all be the same policy. `guard-rules.json` is git-ignored.
-   Until the placeholders are replaced, the file is invalid and the guard blocks
-   **every** shell command (fail closed). A rule may add `"tools": ["PowerShell"]` (or
-   `["Bash"]`) to apply to one shell only; the example uses this for the two delete rules.
+   The key is never printed. Running it again issues a new key and revokes the old one.
+   It ends by running the read-only doctor; the verdict must be READY. Optional settings
+   (`APPROVAL_LINE_GUARD_TIMEOUT_SECONDS`, `APPROVAL_LINE_GUARD_ALLOW_MANUAL_DIAL`) can be
+   added to the same `env` block.
 
-3. **Set the environment in the PowerShell window you will start Claude Code from.** The
-   hook and the MCP server inherit it:
-   ```powershell
-   $env:APPROVAL_LINE_API_URL = "http://127.0.0.1:8000"
-   $env:APPROVAL_LINE_API_KEY = Read-Host "Approval Line agent key"   # paste; not saved anywhere
-   $env:APPROVAL_LINE_GUARD_RULES = (Resolve-Path .\guard-rules.json).Path
-   # Optional:
-   $env:APPROVAL_LINE_GUARD_TIMEOUT_SECONDS = "300"      # total wait for a decision (5-3000)
-   # $env:APPROVAL_LINE_GUARD_ALLOW_MANUAL_DIAL = "1"    # allow policies with auto-dial off
-   ```
+   *Without connect-claude:* create the key with `app.cli create-key`, copy the example
+   rules and replace every `<..._POLICY_ID>` placeholder, then set the three variables in
+   the window you start Claude Code from. Until the placeholders are replaced the rules
+   file is invalid and the guard blocks **every** shell command (fail closed).
 
-4. **Check the guard without calling anyone.** A harmless command must pass silently
-   (exit 0) and needs no network. Windows PowerShell 5.1 prefixes text it pipes into a
-   program with a UTF-8 byte-order mark, which the guard rejects as invalid JSON (exit 2,
-   fail closed). The first line below switches that off for this window. Claude Code
-   itself sends the hook clean JSON, so this only matters for manual checks:
+2. **Check the guard without calling anyone.** A harmless command must pass silently
+   (exit 0) and needs no network. When you run the guard by hand there is no Claude Code
+   to supply the settings, so set the rules path in this window. Windows PowerShell 5.1
+   also prefixes text it pipes into a program with a UTF-8 byte-order mark, which the
+   guard rejects as invalid JSON (exit 2, fail closed); the first line switches that off.
+   Claude Code itself sends the hook clean JSON:
    ```powershell
    [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false
-   '{"tool_name":"Bash","tool_input":{"command":"ls"},"session_id":"check","cwd":"."}' | ..\env\Scripts\python.exe -m approval_line_agents.guard; $LASTEXITCODE
+   $env:APPROVAL_LINE_GUARD_RULES = (Resolve-Path .\guard-rules.json).Path
+   '{"tool_name":"Bash","tool_input":{"command":"ls"},"session_id":"check","tool_use_id":"manual-check","cwd":"."}' | ..\env\Scripts\python.exe -m approval_line_agents.guard; $LASTEXITCODE
    ```
    Don't pipe a `./deploy.sh production` input in the same way unless you mean it. That
    creates a real request, and with `VOICE_PROVIDER=bolna` it phones the approver.
 
-5. **The MCP server (optional).** It lets Claude read the status, timeline and policy, and
-   wait for a decision. `demo-target/.mcp.json` registers it at project scope. It reads the
-   key from `${APPROVAL_LINE_API_KEY}`, so no secret is stored. Claude Code asks you to
-   approve the project server the first time. To register it by hand instead:
-   ```powershell
-   claude mcp add --transport stdio --env APPROVAL_LINE_API_URL=http://127.0.0.1:8000 approval-line -- (Resolve-Path ..\env\Scripts\python.exe).Path -m approval_line_agents.mcp_server
-   ```
-   Note that `--env APPROVAL_LINE_API_KEY=...` would store the key in Claude Code's
-   config file; the `.mcp.json` route avoids that.
+3. **The MCP server (optional).** It lets Claude read the status, timeline and policy, and
+   wait for a decision. `demo-target/.mcp.json` registers it at project scope and stores
+   no secret: the server inherits `APPROVAL_LINE_API_URL` and `APPROVAL_LINE_API_KEY` from
+   Claude Code, settings file included. Don't add `"${APPROVAL_LINE_API_KEY}"`-style
+   entries to its `env`: those expand from the window's variables only, so in a window
+   without them the server would get the literal text. Claude Code asks you to approve
+   the project server the first time.
 
-6. **Start Claude Code here:**
+4. **Run the preflight** (read-only: no calls, no secrets printed). It reads
+   `settings.local.json` the way Claude Code does and shows where each setting comes from:
+   ```powershell
+   ..\scripts\demo-doctor.ps1
+   ```
+   Fix every `FAIL` until the verdict is `READY`. `REHEARSAL.md` lists what to rehearse.
+
+5. **Start Claude Code here** (any new window; nothing to set first):
    ```powershell
    cd <repo>\demo-target    # you are probably here already
    claude
    ```
    Accept the workspace trust dialog if asked: the pre-allow rule (below) only applies in a
    trusted folder. Run `/hooks` and check that a `PreToolUse` hook with matcher
-   `Bash|PowerShell` is listed.
-
-7. **Run the preflight in the same window** (read-only: no calls, no secrets printed):
-   ```powershell
-   ..\scripts\demo-doctor.ps1
-   ```
-   Fix every `FAIL` until the verdict is `READY`. `REHEARSAL.md` lists what to rehearse.
+   `Bash|PowerShell` is listed. Claude Code reads `settings.local.json` when it starts, so
+   restart it after running `connect-claude` again.
 
 ## How the hook and the pre-allow rule interact
 

@@ -5,7 +5,8 @@ Rehearse every row once before presenting, on the setup you'll present with.
 **Before you start:**
 1. Run `..\scripts\demo-doctor.ps1` in the Claude Code window. The verdict must be `READY`.
 2. For a faster rehearsal, set `$env:APPROVAL_LINE_GUARD_TIMEOUT_SECONDS = "60"` before
-   starting `claude`.
+   starting `claude` (or add it to the `env` block of `.claude\settings.local.json`, which
+   wins over the window).
 3. Delete `output\*.json` afterwards.
 
 **What the hook does:**

@@ -6,8 +6,9 @@
   settings, and the approver's number is verified.
 - **The policy:** **Auto-dial approvers** is on, and its single approver is the phone in
   your hand.
-- **Claude Code:** a PowerShell window in `<repo>\demo-target` with the three
-  `APPROVAL_LINE_*` variables set. `claude` is started there, and `/hooks` shows the guard.
+- **Claude Code:** `connect-claude` has been run (see `README.md`), so the three
+  `APPROVAL_LINE_*` settings live in `.claude\settings.local.json` and any fresh PowerShell
+  window in `<repo>\demo-target` works. `claude` is started there, and `/hooks` shows the guard.
 - **Screen:** the dashboard is open in a browser beside Claude Code, on the request list.
 - **Preflight:** run `..\scripts\demo-doctor.ps1` in the Claude Code window; the verdict must
   be `READY` (read-only, no calls).
