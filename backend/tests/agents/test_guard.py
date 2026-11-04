@@ -19,6 +19,7 @@ import pytest
 
 from approval_line_agents import guard
 from approval_line_agents.guard import (
+    CONFIG_FIX,
     ENV_ALLOW_MANUAL_DIAL,
     ENV_RULES,
     ENV_TIMEOUT,
@@ -392,12 +393,16 @@ def test_missing_api_settings_block_a_matching_command(rules, missing):
     result = run(backend, hook_input(), env)
     assert result.exit_code == EXIT_BLOCK
     assert f"{missing} is not set" in result.message
+    assert CONFIG_FIX in result.message  # says how to fix it
+    assert result.message.endswith(STOP_INSTRUCTION)
     assert backend.calls == []
 
 
 def test_missing_rules_setting_blocks(tmp_path):
     result = run(FakeBackend(), hook_input("ls"), {})
     assert result.exit_code == EXIT_BLOCK and f"{ENV_RULES} is not set" in result.message
+    assert CONFIG_FIX in result.message
+    assert result.message.endswith(STOP_INSTRUCTION)
 
 
 def test_missing_rules_file_blocks(tmp_path):
@@ -463,11 +468,21 @@ def test_a_reinvoked_hook_replays_the_same_request(rules):
     assert backend.posts[0]["body"] == backend.posts[1]["body"]  # same payload: a replay
 
 
-def test_key_falls_back_to_session_and_command_without_a_tool_use_id():
-    one = idempotency_key(parse_hook_input(hook_input(tool_use_id=None)))
-    again = idempotency_key(parse_hook_input(hook_input(tool_use_id=None)))
-    other = idempotency_key(parse_hook_input(hook_input("git push", tool_use_id=None)))
-    assert one == again != other and one.startswith("guard-sc-")
+@pytest.mark.parametrize("tool_use_id", [None, ""])
+def test_a_guarded_command_without_a_tool_use_id_blocks_before_any_request(rules, tool_use_id):
+    # A key derived from session + command would replay an earlier approval for a repeated
+    # command, so there is no fallback: fail closed, with no network call at all.
+    backend = FakeBackend(["approved"])
+    result = run(backend, hook_input(tool_use_id=tool_use_id), env_for(rules))
+    assert result.exit_code == EXIT_BLOCK
+    assert "no tool_use_id" in result.message
+    assert result.message.endswith(STOP_INSTRUCTION)
+    assert backend.calls == []
+
+
+def test_an_unguarded_command_without_a_tool_use_id_still_passes(rules):
+    result = run(FakeBackend(), hook_input("ls", tool_use_id=None), env_for(rules))
+    assert result.exit_code == EXIT_ALLOW
 
 
 def test_unusual_tool_use_ids_are_hashed_into_a_valid_key():

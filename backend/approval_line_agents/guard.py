@@ -20,7 +20,9 @@ A command hook that crashes, exits with another code or times out does NOT block
 own, so this guard catches every failure and exits 2 itself, and the hook is registered
 with ``"onFailure": "block"`` and a timeout longer than the guard's wait.
 
-Environment:
+Environment (``python -m app.cli connect-claude`` writes the first three into the project's
+git-ignored .claude/settings.local.json "env" block; Claude Code passes that block to the
+hook, and it takes precedence over the variables of the window Claude Code started in):
     APPROVAL_LINE_API_URL, APPROVAL_LINE_API_KEY   agent key (requests:create,
                                                    requests:read; policies:read for the
                                                    auto-dial preflight)
@@ -92,6 +94,12 @@ STOP_INSTRUCTION = (
     "STOP: report this reason and the request ID to the user and wait for their "
     "instructions. Do NOT retry this command, and do NOT look for a workaround or an "
     "alternative command to achieve the same result."
+)
+# How to fix a missing setting; appended to configuration errors.
+CONFIG_FIX = (
+    "Fix: from backend/, run `python -m app.cli connect-claude --project demo-target "
+    "--policy-id <policy id>` (it writes demo-target/.claude/settings.local.json), then "
+    "restart Claude Code."
 )
 # Shell tools whose tool_input.command is checked against the rules.
 GUARDED_TOOLS = frozenset({"Bash", "PowerShell"})
@@ -172,7 +180,7 @@ class CompiledRule:
 def load_rules(path_value: str | None) -> list[CompiledRule]:
     """Read and validate the rules file. Any problem raises ``GuardBlockError``."""
     if not path_value or not path_value.strip():
-        raise GuardBlockError(f"{ENV_RULES} is not set, so no command can be checked.")
+        raise GuardBlockError(f"{ENV_RULES} is not set, so no command can be checked. {CONFIG_FIX}")
     path = Path(path_value.strip())
     try:
         raw = path.read_bytes()
@@ -249,15 +257,22 @@ def parse_hook_input(raw: bytes) -> HookInput:
 
 
 def idempotency_key(hook: HookInput) -> str:
-    """Stable per tool call, so a re-invoked hook replays the same request (and call)."""
-    if hook.tool_use_id:
-        candidate = f"guard-{hook.tool_use_id}"
-        if IDEMPOTENCY_KEY_PATTERN.fullmatch(candidate):
-            return candidate
-        digest = hashlib.sha256(hook.tool_use_id.encode()).hexdigest()
-        return f"guard-tu-{digest[:48]}"
-    digest = hashlib.sha256(f"{hook.session_id}\0{hook.command}".encode()).hexdigest()
-    return f"guard-sc-{digest[:48]}"
+    """Stable per tool call, so a re-invoked hook replays the same request (and call).
+
+    Without a tool-use ID there is no safe key: one derived from the session and the
+    command would replay an earlier decision (even an approval) for a repeated command.
+    """
+    if not hook.tool_use_id:
+        raise GuardBlockError(
+            "the hook input from Claude Code has no tool_use_id, so this command cannot be "
+            "tied to its own approval request. Update Claude Code (the guard needs a version "
+            "that sends tool_use_id to PreToolUse hooks)."
+        )
+    candidate = f"guard-{hook.tool_use_id}"
+    if IDEMPOTENCY_KEY_PATTERN.fullmatch(candidate):
+        return candidate
+    digest = hashlib.sha256(hook.tool_use_id.encode()).hexdigest()
+    return f"guard-tu-{digest[:48]}"
 
 
 # --- The request -----------------------------------------------------------------------------
@@ -427,7 +442,7 @@ async def run_guard(
         try:
             settings = ClientSettings.from_env_mapping(env)
         except ValueError as exc:
-            raise GuardBlockError(f"configuration error: {exc}.") from None
+            raise GuardBlockError(f"configuration error: {exc}. {CONFIG_FIX}") from None
         request = build_request(rule, hook)
         allow_manual = env.get(ENV_ALLOW_MANUAL_DIAL, "").strip() == "1"
 
