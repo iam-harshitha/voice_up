@@ -213,3 +213,49 @@ def run_worker(session_factory, mock_provider, voice_settings):
         )
 
     return run
+
+
+# --- Text approvals (Telegram, mock) ------------------------------------------------------
+
+TEXT_SECRET = "test-text-callback-secret-" + "y" * 32  # fixture value, not a real secret
+
+
+@pytest.fixture
+def text_settings(voice_settings: Settings) -> Settings:
+    """Voice (mock) and text (mock) both enabled, as in a local demo."""
+    return voice_settings.model_copy(
+        update={"text_provider": "mock", "text_callback_secret": SecretStr(TEXT_SECRET)}
+    )
+
+
+@pytest.fixture
+def text_client(text_settings: Settings, engine: Engine) -> Iterator[TestClient]:
+    with TestClient(create_app(text_settings)) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def text_provider(text_settings: Settings):
+    from app.text.mock import MockTextProvider
+
+    return MockTextProvider(text_settings)
+
+
+class TextWorkerHarness:
+    """Drives the real text worker loop (send, poll, handle) against the mock provider."""
+
+    def __init__(self, session_factory, provider, settings) -> None:
+        self.session_factory, self.provider, self.settings = session_factory, provider, settings
+        self.offset = None
+
+    def run(self) -> None:
+        from app.workers.text_worker import run_once
+
+        self.offset = run_once(
+            self.session_factory, self.provider, self.settings, self.offset, poll_timeout=0
+        )
+
+
+@pytest.fixture
+def text_worker(session_factory, text_provider, text_settings) -> TextWorkerHarness:
+    return TextWorkerHarness(session_factory, text_provider, text_settings)

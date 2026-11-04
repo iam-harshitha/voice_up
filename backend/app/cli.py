@@ -14,6 +14,9 @@ Examples:
     python -m app.cli disable-dashboard-user --email ops@example.com
     python -m app.cli demo-seed --org-id <uuid> --yes [--issue-agent-key]
     python -m app.cli connect-claude --project demo-target --policy-id <uuid>
+    python -m app.cli pair-telegram --approver-id <uuid>
+    python -m app.cli set-channel --policy-id <uuid> --channel text
+    python -m app.cli text-simulate --prompt-id <uuid> --action approve   # mock only
 """
 
 import argparse
@@ -172,6 +175,48 @@ def _build_parser() -> argparse.ArgumentParser:
     connect.add_argument("--api-url", default="http://127.0.0.1:8000")
     connect.add_argument("--no-doctor", action="store_true", help="Skip the doctor run.")
     connect.add_argument("--no-bolna", action="store_true", help="Doctor: skip the Bolna GET.")
+
+    pair = commands.add_parser(
+        "pair-telegram",
+        help="Print a one-time Telegram link (valid 10 minutes) that links an approver.",
+        description=(
+            "Needs TEXT_PROVIDER=telegram (or mock). Open the printed t.me link on the "
+            "approver's phone and press Start; the bot replies with the approver's name. "
+            "Earlier unused links stop working; using the new one replaces any old link."
+        ),
+    )
+    pair.add_argument("--approver-id", required=True, type=UUID)
+
+    channel = commands.add_parser(
+        "set-channel",
+        help="Switch a policy's approval_channel (voice or text). Audited; bumps the version.",
+    )
+    channel.add_argument("--policy-id", required=True, type=UUID)
+    channel.add_argument("--channel", required=True, choices=["voice", "text"])
+
+    text_sim = commands.add_parser(
+        "text-simulate",
+        help="DEVELOPMENT ONLY: simulate a Telegram tap or message for the text worker.",
+        description=(
+            "Requires TEXT_PROVIDER=mock, TEXT_MOCK_STATE_DIR and a non-production APP_ENV. "
+            "Queues a Telegram-shaped update that a running text worker then handles "
+            "through the real checks. Use exactly one of --prompt-id, --start-url, --text "
+            "or --outbox."
+        ),
+    )
+    target = text_sim.add_mutually_exclusive_group(required=True)
+    target.add_argument("--prompt-id", type=UUID, help="Tap a button on this prompt's message.")
+    target.add_argument("--start-url", help="Press Start on a pairing link (t.me/...?start=...).")
+    target.add_argument("--text", help="Send a free-text message to the bot.")
+    target.add_argument("--outbox", action="store_true", help="Show what the bot sent.")
+    text_sim.add_argument(
+        "--action", choices=["approve", "reject", "confirm", "cancel"], default="approve"
+    )
+    text_sim.add_argument(
+        "--from-user",
+        help="Telegram user ID of the sender (default: the prompt's linked account; "
+        "required with --start-url and --text). Fictional IDs only.",
+    )
     return parser
 
 
@@ -257,6 +302,106 @@ def _voice_simulate(args: argparse.Namespace, settings) -> None:
         raise CliError("the API did not accept the simulated webhook")
 
 
+def _pair_telegram(args: argparse.Namespace, settings, session) -> None:
+    from sqlalchemy import select
+
+    from app.db.models import Approver
+    from app.services import channel_link_service
+
+    approver = session.scalar(select(Approver).where(Approver.id == args.approver_id))
+    session.rollback()
+    if approver is None:
+        raise CliError("approver not found")
+    try:
+        pairing = channel_link_service.start_pairing(
+            session, settings, approver.organization_id, approver.id
+        )
+    except AppError as exc:
+        raise CliError(exc.message) from exc
+    expires = pairing.link.pairing_expires_at
+    print(f"Telegram pairing link for '{approver.name}' (one-time, expires {expires:%H:%M} UTC):")
+    print(f"  {pairing.url}")
+    print("Open it on the approver's phone and press Start. The bot replies with their name.")
+    print("Whoever opens this link first is linked, so send it only to the approver.")
+
+
+def _set_channel(args: argparse.Namespace, session) -> None:
+    from sqlalchemy import select
+
+    from app.db.models import ApprovalPolicy
+    from app.schemas.policy import PolicyUpdate
+    from app.services import policy_service
+
+    org_id = session.scalar(
+        select(ApprovalPolicy.organization_id).where(ApprovalPolicy.id == args.policy_id)
+    )
+    session.rollback()
+    if org_id is None:
+        raise CliError("policy not found")
+    try:
+        policy = policy_service.update_policy(
+            session, org_id, args.policy_id, PolicyUpdate(approval_channel=args.channel)
+        )
+    except AppError as exc:
+        raise CliError(exc.message) from exc
+    print(
+        f"Policy '{policy.name}': approval_channel={policy.approval_channel}, "
+        f"auto_dial={'on' if policy.auto_dial else 'off'}, version {policy.version}"
+    )
+    if policy.approval_channel == "text":
+        print("New requests under it are sent by Telegram only; no call is placed.")
+
+
+_TAP_ACTIONS = {"approve": "a", "reject": "r", "confirm": "c", "cancel": "x"}
+
+
+def _text_simulate(args: argparse.Namespace, settings, session) -> None:
+    from urllib.parse import parse_qs, urlparse
+
+    from app.db.models import ApproverChannelLink, TextPrompt
+    from app.text.mock import MockTextProvider
+
+    if (
+        settings.text_provider != "mock"
+        or settings.app_env == "production"
+        or not settings.text_mock_state_dir
+    ):
+        raise CliError(
+            "text-simulate needs TEXT_PROVIDER=mock, TEXT_MOCK_STATE_DIR and a "
+            "non-production APP_ENV"
+        )
+    mock = MockTextProvider(settings)
+    if args.outbox:
+        for item in mock.outbox()[-10:]:
+            print(f"[{item['kind']}] {item.get('text', '')}\n")
+        return
+    if args.prompt_id is not None:
+        prompt = session.get(TextPrompt, args.prompt_id)
+        if prompt is None or prompt.provider_message_id is None:
+            raise CliError("no delivered prompt with that ID (is the text worker running?)")
+        sender = args.from_user
+        if sender is None:
+            link = session.get(ApproverChannelLink, prompt.link_id)
+            sender = link.external_user_id if link is not None else None
+        if not sender:
+            raise CliError("--from-user is required (the prompt's link has no account)")
+        try:
+            mock.tap_button(prompt.provider_message_id, _TAP_ACTIONS[args.action], sender_id=sender)
+        except LookupError as exc:
+            raise CliError(f"no '{args.action}' button on the message right now") from exc
+        print(f"tap queued: {args.action} on prompt {prompt.id}; the text worker handles it")
+        return
+    if not args.from_user or not args.from_user.isdigit():
+        raise CliError("--from-user must be a numeric (fictional) Telegram user ID")
+    if args.start_url is not None:
+        code = parse_qs(urlparse(args.start_url).query).get("start", [""])[0]
+        mock.send_text(f"/start {code}", sender_id=args.from_user)
+        print("Start queued; the text worker links the account and replies")
+    else:
+        mock.send_text(args.text, sender_id=args.from_user)
+        print("message queued (free text is never counted as a decision)")
+
+
 DEMO_AGENT_KEY = "demo-agent"
 DEMO_AGENT_SCOPES = "requests:create,requests:read,audit:read,policies:read"
 
@@ -335,6 +480,15 @@ def _run(args: argparse.Namespace) -> int:
     try:
         if args.command == "connect-claude":
             return _connect_claude(args, session)
+        if args.command == "pair-telegram":
+            _pair_telegram(args, settings, session)
+            return 0
+        if args.command == "set-channel":
+            _set_channel(args, session)
+            return 0
+        if args.command == "text-simulate":
+            _text_simulate(args, settings, session)
+            return 0
         if args.command == "create-org":
             with transaction(session):
                 organization = api_key_service.create_organization(session, args.name)
