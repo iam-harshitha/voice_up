@@ -684,7 +684,11 @@ def test_demo_hook_registration_blocks_on_failure_and_outlasts_the_wait(tmp_path
     assert hook["timeout"] >= guard.DEFAULT_TIMEOUT_SECONDS + 60
     mcp = json.loads((DEMO_TARGET / ".mcp.json").read_text("utf-8"))["mcpServers"]
     server = mcp["approval-line"]
-    assert server["env"]["APPROVAL_LINE_API_KEY"] == "${APPROVAL_LINE_API_KEY}"  # no secret
+    # No APPROVAL_LINE_API_* entry at all (so no secret either): the server inherits them
+    # from Claude Code, which includes settings.local.json's "env" block. A "${VAR}" entry
+    # would override that with the launching window's value, or with the literal text when
+    # the window has none (verified on Claude Code 2.1.316).
+    assert not any(name.startswith("APPROVAL_LINE_API") for name in server.get("env", {}))
     assert server["timeout"] > 60_000  # ms; above the wait tool's 60 s cap
 
 
