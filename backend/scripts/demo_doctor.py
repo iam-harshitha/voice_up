@@ -53,13 +53,16 @@ UNWANTED_SCOPES = frozenset({"votes:write", "voice:calls:create", "conditions:re
 WEBHOOK_PATH = "/api/v1/voice/webhooks/bolna"
 STALE_JOB_SECONDS = 120
 POLICY_SQL = (
-    "SELECT name, is_active, auto_dial, organization_id, approval_channel "
-    "FROM approval_policies WHERE id = :p"
+    "SELECT name, is_active, auto_dial, organization_id, approval_channel, "
+    "voice_fallback_after_seconds FROM approval_policies WHERE id = :p"
 )
 POLICY_SQL_BEFORE_0007 = (
-    "SELECT name, is_active, auto_dial, organization_id, 'voice' AS approval_channel "
-    "FROM approval_policies WHERE id = :p"
+    "SELECT name, is_active, auto_dial, organization_id, 'voice' AS approval_channel, "
+    "60 AS voice_fallback_after_seconds FROM approval_policies WHERE id = :p"
 )
+# Budget for a fallback call after the delay: ringing, the conversation, Bolna's
+# post-call processing and one reconciliation poll (VOICE_RECONCILE_AFTER_SECONDS=30).
+CALL_BUDGET_SECONDS = 240
 
 PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
 
@@ -205,6 +208,14 @@ def check_policy_row(
         return Check(
             name, PASS, f"{label}: active, auto-dial on, channel text (Telegram only, no calls)"
         )
+    if row.get("approval_channel") == "text_then_voice":
+        return Check(
+            name,
+            PASS,
+            f"{label}: active, auto-dial on, channel text_then_voice (Telegram, then a call "
+            f"after {row.get('voice_fallback_after_seconds')} s), "
+            f"{callable_count} callable approver(s)",
+        )
     return Check(
         name, PASS, f"{label}: active, auto-dial on, {callable_count} callable approver(s)"
     )
@@ -282,13 +293,27 @@ def check_text_settings(settings: Any) -> list[Check]:
 def check_text_pairing(
     policy_id: UUID, channel: str, text_provider: str, linked: list[bool]
 ) -> Check | None:
-    """For a guarded 'text' policy: text must be on and every approver paired."""
-    if channel != "text":
+    """For a guarded 'text' or 'text_then_voice' policy: text on, every approver paired.
+
+    'text_then_voice' still calls approvers it cannot text, so its problems are WARN.
+    """
+    if channel not in ("text", "text_then_voice"):
         return None
     name = f"Text pairing {policy_id}"
+    unpaired = linked.count(False)
+    if channel == "text_then_voice":
+        if text_provider == "disabled":
+            return Check(name, WARN, "TEXT_PROVIDER=disabled: every approver is called at once")
+        if not linked or unpaired:
+            return Check(
+                name,
+                WARN,
+                f"{unpaired} of {len(linked)} approver(s) without a verified Telegram link "
+                "are called at once (pair: python -m app.cli pair-telegram --approver-id <id>)",
+            )
+        return Check(name, PASS, f"{len(linked)} approver(s) linked to Telegram")
     if text_provider == "disabled":
         return Check(name, FAIL, "policy uses text but TEXT_PROVIDER=disabled (nobody is asked)")
-    unpaired = linked.count(False)
     if not linked or unpaired:
         return Check(
             name,
@@ -297,6 +322,25 @@ def check_text_pairing(
             "(run: python -m app.cli pair-telegram --approver-id <id>)",
         )
     return Check(name, PASS, f"{len(linked)} approver(s) linked to Telegram")
+
+
+def check_voice_fallback(policy_id: UUID, fallback: int, guard_timeout: float) -> Check:
+    """The guard must wait for the text, the fallback delay and a whole call."""
+    name = f"Voice fallback {policy_id}"
+    needed = fallback + CALL_BUDGET_SECONDS
+    detail = (
+        f"call after {fallback} s without a Telegram decision; guard waits {guard_timeout:g} s "
+        f"(needs >= {needed} s: fallback + ~{CALL_BUDGET_SECONDS} s for the call)"
+    )
+    if guard_timeout < needed:
+        return Check(
+            name,
+            WARN,
+            detail + f". Set APPROVAL_LINE_GUARD_TIMEOUT_SECONDS >= {needed} in the "
+            "project's settings.local.json env block and the hook timeout >= that + 60, "
+            "or lower the fallback",
+        )
+    return Check(name, PASS, detail)
 
 
 def check_text_worker(count: int | None, overdue: int, text_needed: bool) -> Check:
@@ -655,7 +699,13 @@ def run_doctor(
                 )
                 report.checks.append(check_policy_row(policy_id, policy, approvers, key_org))
                 channel = policy["approval_channel"] if policy else "voice"
-                if channel == "text":
+                if channel == "text_then_voice":
+                    report.checks.append(
+                        check_voice_fallback(
+                            policy_id, int(policy["voice_fallback_after_seconds"]), guard_timeout
+                        )
+                    )
+                if channel in ("text", "text_then_voice"):
                     text_needed = True
                     linked = [
                         bool(row[0])

@@ -445,3 +445,19 @@ def test_a_bot_username_that_is_not_the_tokens_bot_fails(world):
 
     report, _, _ = world["run"](settings_update=TELEGRAM_SETTINGS)
     assert by_name(report, "Telegram bot")[0].status == "PASS"
+
+
+def test_a_text_then_voice_policy_prints_its_fallback(world):
+    client, tenant, policy = world["client"], world["tenant"], world["policy"]
+    client.patch(
+        f"{API}/policies/{policy['id']}",
+        json={"approval_channel": "text_then_voice", "voice_fallback_after_seconds": 10},
+        headers=tenant.admin,
+    )
+    report, _, _ = world["run"](settings_update=TELEGRAM_SETTINGS, text_workers=0)
+    assert "Telegram, then a call after 10 s" in by_name(report, "Policy")[0].detail
+    (fallback,) = by_name(report, "Voice fallback")
+    assert fallback.status == "PASS" and "call after 10 s" in fallback.detail
+    assert by_name(report, "Text pairing")[0].status == "WARN"  # unpaired: called at once
+    assert by_name(report, "Text worker")[0].status == "FAIL"
+    assert by_name(report, "Voice worker")[0].status == "PASS"

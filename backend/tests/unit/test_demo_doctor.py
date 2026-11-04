@@ -206,3 +206,22 @@ def test_telegram_bot_check():
     assert doctor.check_telegram_bot("Ready57", "Ready57Bot", None).status == "FAIL"
     assert doctor.check_telegram_bot("Ready57Bot", "Ready57Bot", None).status == "PASS"
     assert doctor.check_telegram_bot("Ready57Bot", None, "ConnectError").status == "WARN"
+
+
+def test_text_then_voice_pairing_problems_are_warnings():
+    pid = uuid.uuid4()
+    assert doctor.check_text_pairing(pid, "text_then_voice", "telegram", [False]).status == "WARN"
+    assert doctor.check_text_pairing(pid, "text_then_voice", "disabled", [True]).status == "WARN"
+    assert doctor.check_text_pairing(pid, "text_then_voice", "telegram", [True]).status == "PASS"
+
+
+def test_voice_fallback_must_fit_the_guard_wait():
+    pid = uuid.uuid4()
+    ok = doctor.check_voice_fallback(pid, 10, 300.0)
+    assert ok.status == "PASS" and "call after 10 s" in ok.detail
+    too_long = doctor.check_voice_fallback(pid, 600, 300.0)
+    assert (
+        too_long.status == "WARN"
+        and "APPROVAL_LINE_GUARD_TIMEOUT_SECONDS >= 840" in too_long.detail
+    )
+    assert doctor.check_voice_fallback(pid, 600, 900.0).status == "PASS"
